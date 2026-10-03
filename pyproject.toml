@@ -1,0 +1,13 @@
+[project]
+name = "tickfast"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = [
+    "dotenv>=0.9.9",
+    "fastapi>=0.142.2",
+    "peewee>=4.5.2",
+    "pymysql>=1.2.3",
+    "uvicorn>=0.54.0",
+]
