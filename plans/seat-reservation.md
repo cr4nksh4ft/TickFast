@@ -15,7 +15,7 @@ Build, deploy, and operate a JSON API for assigned-seat reservations using FastA
 ## Implementation Sequence
 
 1. **Build the FastAPI surface.** Follow [fastapi-mini-plan.md](fastapi-mini-plan.md) for the app factory, request/response models, routers, authentication dependencies, health endpoints, error mapping, and initial contract tests.
-2. **Define the schema and startup path.** Add versioned MySQL DDL for shows, seats, reservations, reservation-seat links, idempotency results, and per-show/per-user seat usage. Use InnoDB, integer paise, and unique keys including `(show_id, seat_label)` and `(show_id, user_id, idempotency_key)`. Make app import independent of DB availability; expose an explicit schema/migration startup step.
+2. **Define the schema and migration path.** Versioned SQL migrations live in `migrations/`; run them explicitly with `uv run python -m migrations`, never during app import/startup. The initial migrations create `shows` and `seats`; later migrations add reservations, reservation-seat links, idempotency results, and per-show/per-user seat usage. Use InnoDB, integer paise, and unique keys including `(show_id, seat_label)` and `(show_id, user_id, idempotency_key)`. The runner records version, filename, and SHA-256 checksum, takes a MySQL advisory lock, and is forward-only because MySQL DDL may commit independently.
 3. **Implement shows.** Add admin-only `POST /shows` and public/authenticated `GET /shows/{id}` per the chosen API contract. Read responses include every seat and counts; `available + held + confirmed == total_seats` must reconcile. With the cancellation model, seats transition between `available` and `confirmed`; `held` remains zero.
 4. **Implement reservations transactionally.** Normalize and hash the requested body. In a transaction, claim the unique `(show_id, user_id, idempotency_key)` record. A duplicate key with the same hash returns the stored outcome; a different hash returns `409`. For a new key, create or lock the user's per-show usage row, check the limit, then lock all requested seat rows in sorted seat-label order with `SELECT ... FOR UPDATE`. If any seat is unavailable, record a `409` decline for the key and make no seat changes. Otherwise create the reservation and seat links, mark every seat confirmed, increment usage, store the successful response, and commit. Treat expected conflicts as domain outcomes, not `500`s.
 5. **Implement cancellation with consistent lock order.** Resolve the reservation's show and owner, then acquire locks in the same order used by reservations: per-user usage row, reservation row, then seat rows sorted by label. Recheck ownership and state under lock; atomically mark canceled, return its seats to available, decrement usage, and commit. Repeated cancellation and non-owner cancellation should have documented, tested outcomes. No cancellation path may free a seat now owned by another reservation.
@@ -26,7 +26,7 @@ Build, deploy, and operate a JSON API for assigned-seat reservations using FastA
 
 ## Dependencies
 
-Already present in `pyproject.toml`: FastAPI, Peewee, PyMySQL, Uvicorn, and `dotenv`. Keep FastAPI/Peewee/PyMySQL/Uvicorn. Verify whether the installed `dotenv` distribution is the one providing the `load_dotenv` API used in `utils/env.py`; if not, standardize on `python-dotenv`.
+Present in `pyproject.toml`: FastAPI, Peewee, PyMySQL, Uvicorn, and `python-dotenv`; dev dependencies include `httpx` and `pytest`.
 
 Add:
 
@@ -39,7 +39,7 @@ Use Docker Compose MySQL for transactional integration tests. Avoid adding Redis
 
 ## Verification Gates
 
-1. From a clean checkout, run `uv sync --locked`; start MySQL and the API with Compose and confirm schema initialization and healthy startup.
+1. From a clean checkout, run `uv sync --locked`; start MySQL, run `uv run python -m migrations`, then start the API with Compose and confirm healthy startup.
 2. Run contract and InnoDB integration tests. Require exactly one hot-seat winner, no 5xx for expected conflicts, no over-limit state, stable same-key retries, no partial multi-seat reservations, owner-only cancellation, and exact seat reconciliation.
 3. Check health and metrics endpoints. Stop MySQL and verify readiness fails while liveness remains available.
 4. Run the documented burst script locally and against the deployment. Compare API state and metrics with the script's final reconciliation and inspect request-correlated structured logs.

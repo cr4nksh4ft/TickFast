@@ -1,5 +1,8 @@
-def main():
-    print("Hello from tickfast!")
+import uvicorn
+
+
+def main() -> None:
+    uvicorn.run("tickfast.api:app", host="0.0.0.0", port=8000)
 
 
 if __name__ == "__main__":

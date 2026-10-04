@@ -2,33 +2,32 @@
 
 This is the first implementation slice of the seat-reservation project. It establishes the API boundary and testable HTTP contract before implementing the transactional reservation engine.
 
-## Current Starting Point
+## Implemented in the First Slice
 
-- `tickfast/api/__init__.py` exists and is empty.
-- `main.py` is currently a hello-world script.
-- `models/basemodel.py` creates a pooled MySQL database at import time using `utils/env.py`.
-- `models/seats.py` is empty.
-- `utils/env.py` imports `dotenv`, expects a root `.env`, and can validate environment values while configuration is read.
-- The project already includes FastAPI, Peewee, PyMySQL, and Uvicorn.
+- `tickfast.api:app` is built through `create_app()`; `main.py` runs Uvicorn.
+- `/health/live` is independent of MySQL. `/health/ready` pings MySQL and fails with `503` when configuration or connectivity is unavailable.
+- Public `GET /shows/{id}` returns a typed seat-state response or a structured `404`/`503` error. Its Peewee models and query are present; table creation/migrations and show creation are not yet implemented.
+- Pydantic request contracts cover show creation and seat reservation. Unknown fields are forbidden, seat labels must be nonblank and unique, and price is a positive integer. The reservation endpoint and `Idempotency-Key` header handling remain deferred.
+- Errors use a structured response; requests receive a generated `X-Request-ID` and structured request logs.
+- MySQL pool creation is lazy. `.env` is optional, and existing environment variables are not overridden.
+- JWT auth and all protected routes are intentionally deferred; no unauthenticated write routes are exposed.
 
-## Steps
+## Follow-Up Steps
 
-1. **Create an importable ASGI app.** Add a small `create_app()` factory and expose `app` from `tickfast/api/__init__.py`. Keep `main.py` as a thin Uvicorn runner. Importing the application must not require a reachable database or a populated `.env`.
-2. **Define request and response contracts.** Add Pydantic models for show creation/state, reserve, cancel, and structured errors. Validate non-empty unique seat labels, positive integer `price_paise`, a non-empty unique seat list, and an idempotency key. Forbid unexpected request fields so clients cannot pass an apparent `user_id` to spoof identity.
-3. **Create focused routers.** Separate show, reservation, and health routes. Begin with show creation/read and liveness/readiness; add reserve/cancel endpoints against service functions as those land. Keep HTTP parsing/status mapping in the route layer and leave all atomic decisions to the model/service transaction layer.
-4. **Add auth dependencies.** Verify signed bearer tokens and expose separate current-user and admin dependencies. Derive user identity from the verified token subject. Test missing, invalid, and insufficient-role tokens.
-5. **Decouple database lifecycle.** Refine `models/basemodel.py` and configuration access so importing the ASGI app does not connect to MySQL or require a local `.env`. Open/close Peewee connections at request or transaction boundaries. The readiness endpoint should explicitly ping MySQL and return unavailable when that check fails; liveness should not depend on MySQL.
-6. **Centralize request handling.** Add request/correlation ID middleware and structured logging. Map known domain conflicts to consistent `409` responses and avoid returning internal exception details. Add `/metrics` after the core response contract is established.
-7. **Test the API slice.** Use FastAPI `TestClient` and `httpx` to test validation, auth/role enforcement, response shapes/status codes, health behavior, and app import/startup without a live DB. These tests verify the HTTP contract only; concurrency correctness must be tested later against real MySQL/InnoDB.
+1. Implement signed bearer-token verification and user/admin dependencies; add a local token-minting helper.
+2. Add admin-only show creation and authenticated reserve/cancel endpoints. Require `Idempotency-Key` on reserve and derive identity only from token claims.
+3. Add the complete MySQL schema/migrations, transaction services, lock ordering, per-user usage accounting, and cancellation state transitions.
+4. Extend tests to real MySQL/InnoDB concurrency, then add metrics, containerization, deployment, and the burst tool.
 
-## First Slice Dependencies
+## Dependencies
 
-Keep FastAPI, Peewee, PyMySQL, and Uvicorn from `pyproject.toml`. Add `PyJWT` for token verification and `httpx`/`pytest` for tests. The later observability slice adds `prometheus-client`. Verify the current `dotenv` package/API pairing and use `python-dotenv` if that is the package actually needed by `utils/env.py`.
+- Present: FastAPI, Peewee, PyMySQL, Uvicorn, and `python-dotenv`.
+- Development: `pytest` and `httpx`.
+- Add `PyJWT` with the auth slice and `prometheus-client` with observability.
 
-## Done When
+## Verification
 
-- `uvicorn tickfast.api:app` imports successfully without a database connection.
-- Health liveness responds without MySQL; readiness reports failure when MySQL is unavailable and success when it is reachable.
-- Show routes have stable request/response schemas and expected status codes.
-- User/admin authorization derives from token claims, and extra identity fields in request bodies are rejected.
-- FastAPI contract tests pass. MySQL locking, idempotency, per-user limits, and cancellation remain explicit follow-on work in the full [seat reservation plan](seat-reservation.md).
+- `uv run --locked pytest tests/test_api.py -q`: 7 tests pass.
+- `uv lock --check`: dependency lock is synchronized.
+- Tests verify import without DB configuration, liveness, readiness responses (with the DB probe overridden), public show-read response mapping (with the data function mocked), and request validation.
+- A live MySQL connection, schema migration, and show-read query have not yet been integration-tested. Concurrency correctness remains a later InnoDB test gate; see the full [seat reservation plan](seat-reservation.md).

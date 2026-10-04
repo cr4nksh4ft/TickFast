@@ -1,4 +1,6 @@
-from fastapi import FastAPI
+from tickfast.api.app import create_app
 
-app = FastAPI()
+app = create_app()
+
+__all__ = ["app", "create_app"]
 
