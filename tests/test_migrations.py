@@ -6,13 +6,19 @@ from migrations.runner import MigrationError, load_migrations
 from tickfast.states import SeatState, UserRole
 
 
-def test_initial_migrations_are_numbered_and_ordered():
+def test_migrations_are_numbered_and_ordered():
     migrations = load_migrations()
 
-    assert [migration.version for migration in migrations] == [1, 2, 3]
-    assert migrations[0].filename == "001_create_shows.sql"
-    assert migrations[1].filename == "002_create_seats.sql"
-    assert migrations[2].filename == "003_create_users.sql"
+    assert [migration.version for migration in migrations] == list(range(1, 8))
+    assert [migration.filename for migration in migrations] == [
+        "001_create_shows.sql",
+        "002_create_seats.sql",
+        "003_create_users.sql",
+        "004_create_reservations.sql",
+        "005_create_reservation_seats.sql",
+        "006_create_idempotency_results.sql",
+        "007_create_show_user_usage.sql",
+    ]
 
 
 def test_users_migration_defines_generated_primary_key_and_role_constraint():
@@ -30,6 +36,29 @@ def test_seat_migration_allows_exactly_the_python_seat_states():
 
     for state in SeatState:
         assert f"'{state.value}'" in seat_migration
+
+
+def test_reservation_migrations_define_history_and_identity_constraints():
+    migrations = {migration.filename: migration.statement for migration in load_migrations()}
+    reservations = migrations["004_create_reservations.sql"]
+    reservation_seats = migrations["005_create_reservation_seats.sql"]
+    idempotency_results = migrations["006_create_idempotency_results.sql"]
+    show_user_usage = migrations["007_create_show_user_usage.sql"]
+
+    assert "FOREIGN KEY (show_id)" in reservations
+    assert "FOREIGN KEY (user_id)" in reservations
+    assert "UNIQUE KEY uq_reservations_id_show_user (id, show_id, user_id)" in reservations
+    assert "FOREIGN KEY (reservation_id)" in reservation_seats
+    assert "FOREIGN KEY (seat_id)" in reservation_seats
+    assert "PRIMARY KEY (reservation_id, seat_id)" in reservation_seats
+    assert "PRIMARY KEY (show_id, user_id, idempotency_key)" in idempotency_results
+    assert "request_hash CHAR(64)" in idempotency_results
+    assert "response_body JSON" in idempotency_results
+    assert "FOREIGN KEY (reservation_id, show_id, user_id)" in " ".join(
+        idempotency_results.split()
+    )
+    assert "PRIMARY KEY (show_id, user_id)" in show_user_usage
+    assert "active_seat_count INTEGER UNSIGNED" in show_user_usage
 
 
 def test_migration_must_contain_only_one_statement(tmp_path: Path):

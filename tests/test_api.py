@@ -14,12 +14,14 @@ from pydantic import ValidationError
 
 from models import basemodel
 from models.basemodel import check_database_connection
+from models.reservations import ReservationNotOwnerError, ReservationOutcome
 from models.users import User
 from scripts import create_show as create_show_script
 from scripts import create_user as create_user_script
 from scripts import mint_token as mint_token_script
 from tickfast.api import create_app
 from tickfast.api import auth
+from tickfast.api.routes import reservations as reservation_routes
 from tickfast.api.routes import shows as show_routes
 from tickfast.api.schemas import CreateShowRequest, ReserveRequest
 from tickfast.states import SeatState, UserRole
@@ -375,6 +377,186 @@ def test_show_creation_requires_a_bearer_token(monkeypatch, client):
     assert response.json()["detail"]["code"] == "authentication_required"
 
 
+def test_reservation_requires_user_auth_and_idempotency_key(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    monkeypatch.setattr(
+        reservation_routes,
+        "reserve_seats",
+        lambda *args: pytest.fail("invalid reservation reached the service"),
+    )
+    token = auth.create_access_token(41)
+
+    unauthenticated = client.post(
+        "/shows/9/reserve",
+        headers={"Idempotency-Key": "request-1"},
+        json={"seats": ["A1"]},
+    )
+    missing_key = client.post(
+        "/shows/9/reserve",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"seats": ["A1"]},
+    )
+
+    assert unauthenticated.status_code == 401
+    assert missing_key.status_code == 422
+
+
+def test_reservation_route_uses_token_identity_and_returns_service_result(
+    monkeypatch, client
+):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    calls = []
+
+    def reserve_seats(show_id, user_id, seats, idempotency_key):
+        calls.append((show_id, user_id, seats, idempotency_key))
+        return ReservationOutcome(
+            status_code=201,
+            body={
+                "reservation_id": 17,
+                "show_id": show_id,
+                "user_id": user_id,
+                "seats": seats,
+                "amount_paise": 25000,
+                "status": "confirmed",
+            },
+        )
+
+    monkeypatch.setattr(reservation_routes, "reserve_seats", reserve_seats)
+    token = auth.create_access_token(41)
+
+    response = client.post(
+        "/shows/9/reserve",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Idempotency-Key": "request-1",
+        },
+        json={"seats": [" A1 "]},
+    )
+
+    assert response.status_code == 201
+    assert calls == [(9, 41, ["A1"], "request-1")]
+    assert response.json() == {
+        "reservation_id": 17,
+        "show_id": 9,
+        "user_id": 41,
+        "seats": ["A1"],
+        "amount_paise": 25000,
+        "status": "confirmed",
+    }
+
+
+def test_reservation_route_returns_structured_conflict(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    monkeypatch.setattr(
+        reservation_routes,
+        "reserve_seats",
+        lambda *args: ReservationOutcome(
+            status_code=409,
+            body={
+                "detail": {
+                    "code": "seat_taken",
+                    "message": "One or more requested seats are not available",
+                }
+            },
+        ),
+    )
+    token = auth.create_access_token(41)
+
+    response = client.post(
+        "/shows/9/reserve",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Idempotency-Key": "request-1",
+        },
+        json={"seats": ["A1"]},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["code"] == "seat_taken"
+    assert response.json()["detail"]["request_id"] == response.headers["x-request-id"]
+
+
+def test_cancellation_route_uses_token_identity(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    calls = []
+
+    def cancel_reservation(reservation_id, user_id):
+        calls.append((reservation_id, user_id))
+        return ReservationOutcome(
+            status_code=200,
+            body={
+                "reservation_id": reservation_id,
+                "show_id": 9,
+                "user_id": user_id,
+                "seats": ["A1"],
+                "amount_paise": 25000,
+                "status": "cancelled",
+            },
+        )
+
+    monkeypatch.setattr(
+        reservation_routes, "cancel_reservation_record", cancel_reservation
+    )
+    token = auth.create_access_token(41)
+
+    response = client.post(
+        "/reservations/17/cancel",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 200
+    assert calls == [(17, 41)]
+    assert response.json()["status"] == "cancelled"
+
+
+def test_cancellation_route_forbids_non_owner(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    monkeypatch.setattr(
+        reservation_routes,
+        "cancel_reservation_record",
+        lambda *args: (_ for _ in ()).throw(ReservationNotOwnerError()),
+    )
+    token = auth.create_access_token(41)
+
+    response = client.post(
+        "/reservations/17/cancel",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "forbidden"
+
+
 def test_invalid_and_expired_tokens_are_rejected(monkeypatch, client):
     secret = "s" * 32
     monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
@@ -510,7 +692,7 @@ def test_show_price_requires_an_integer(price_paise):
 
 @pytest.mark.parametrize(
     "seats",
-    [[], [" "], ["A1", "A1"], ["A1", "A1 "]],
+    [[], [" "], ["A1", "A1"], ["A1", "A1 "], ["X" * 256]],
 )
 def test_show_requires_unique_nonblank_seat_labels(seats):
     with pytest.raises(ValidationError):

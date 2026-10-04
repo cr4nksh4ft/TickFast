@@ -44,6 +44,8 @@ class ReserveRequest(StrictRequest):
         seats = [seat.strip() for seat in value]
         if any(not seat for seat in seats):
             raise ValueError("seat labels must not be blank")
+        if any(len(seat) > 255 for seat in seats):
+            raise ValueError("seat labels must be at most 255 characters")
         if len(seats) != len(set(seats)):
             raise ValueError("seat labels must be unique")
         return seats

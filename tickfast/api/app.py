@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from tickfast.api.routes.health import router as health_router
+from tickfast.api.routes.reservations import router as reservations_router
 from tickfast.api.routes.shows import router as shows_router
 
 logger = logging.getLogger("tickfast.request")
@@ -19,6 +20,7 @@ def create_app() -> FastAPI:
     app = FastAPI(title="TickFast", version="0.1.0")
     app.include_router(health_router)
     app.include_router(shows_router)
+    app.include_router(reservations_router)
 
     @app.middleware("http")
     async def add_request_id(request: Request, call_next):
