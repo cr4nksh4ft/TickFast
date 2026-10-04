@@ -1,8 +1,10 @@
+import json
 import os
 import subprocess
 import sys
 import time
 
+import httpx
 import jwt
 import pytest
 from fastapi import HTTPException
@@ -13,6 +15,7 @@ from pydantic import ValidationError
 from models import basemodel
 from models.basemodel import check_database_connection
 from models.users import User
+from scripts import create_show as create_show_script
 from scripts import create_user as create_user_script
 from scripts import mint_token as mint_token_script
 from tickfast.api import create_app
@@ -146,7 +149,7 @@ def test_show_read_maps_database_configuration_errors_to_503(monkeypatch, client
     assert response.json()["detail"]["code"] == "database_unavailable"
 
 
-def test_request_contract_rejects_duplicate_seats_and_identity_spoofing():
+def test_show_contract_rejects_spoofed_seats_and_identity():
     with pytest.raises(ValidationError):
         CreateShowRequest(
             name="friday-night",
@@ -262,6 +265,76 @@ def test_mint_token_cli_rejects_unknown_user(monkeypatch, capsys):
 
     assert error.value.code == 2
     assert "No user found with id 999" in capsys.readouterr().err
+
+
+def test_create_show_cli_reads_admin_token_and_sends_bearer_request(
+    monkeypatch, capsys
+):
+    requests = []
+
+    def fake_post(url, *, headers, json, timeout):
+        requests.append((url, headers, json, timeout))
+        return httpx.Response(
+            201,
+            json={"id": 8, "name": "friday-night"},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(
+        create_show_script,
+        "env",
+        lambda name, default=None: {
+            "ADMIN_TOKEN": "local-admin-token",
+            "TICKFAST_API_URL": "http://localhost:8000/",
+        }.get(name, default),
+    )
+    monkeypatch.setattr(create_show_script.httpx, "post", fake_post)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "create_show",
+            "--name",
+            "friday-night",
+            "--price-paise",
+            "25000",
+            "--seats",
+            "A1",
+            "A2",
+            "B1",
+        ],
+    )
+
+    assert create_show_script.main() == 0
+
+    assert requests == [
+        (
+            "http://localhost:8000/shows",
+            {"Authorization": "Bearer local-admin-token"},
+            {
+                "name": "friday-night",
+                "seats": ["A1", "A2", "B1"],
+                "price_paise": 25000,
+            },
+            10.0,
+        )
+    ]
+    assert json.loads(capsys.readouterr().out) == {"id": 8, "name": "friday-night"}
+
+
+def test_create_show_cli_requires_admin_token(monkeypatch, capsys):
+    monkeypatch.setattr(create_show_script, "env", lambda name, default=None: default)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        ["create_show", "--name", "show", "--price-paise", "1", "--seats", "A1"],
+    )
+
+    with pytest.raises(SystemExit) as error:
+        create_show_script.main()
+
+    assert error.value.code == 2
+    assert "ADMIN_TOKEN must be set" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize(
@@ -390,20 +463,20 @@ def test_admin_token_creates_show_and_returns_initial_seat_states(monkeypatch, c
     monkeypatch.setattr(
         show_routes,
         "create_show_record",
-        lambda name, seats, price_paise: {
+        lambda name, seat_labels, price_paise: {
             "id": 1,
             "name": name,
             "price_paise": price_paise,
             "seats": [
                 {"label": label, "status": SeatState.AVAILABLE.value}
-                for label in seats
+                for label in seat_labels
             ],
             "counts": {
-                SeatState.AVAILABLE.value: len(seats),
+                SeatState.AVAILABLE.value: len(seat_labels),
                 SeatState.HELD.value: 0,
                 SeatState.CONFIRMED.value: 0,
             },
-            "total_seats": len(seats),
+            "total_seats": len(seat_labels),
         },
     )
     token = auth.create_access_token(2)
@@ -411,13 +484,17 @@ def test_admin_token_creates_show_and_returns_initial_seat_states(monkeypatch, c
     response = client.post(
         "/shows",
         headers={"Authorization": f"Bearer {token}"},
-        json={"name": "friday-night", "seats": ["A1", "A2"], "price_paise": 25000},
+        json={
+            "name": "friday-night",
+            "seats": ["A1", "B1"],
+            "price_paise": 25000,
+        },
     )
 
     assert response.status_code == 201
     assert response.json()["seats"] == [
         {"label": "A1", "status": SeatState.AVAILABLE.value},
-        {"label": "A2", "status": SeatState.AVAILABLE.value},
+        {"label": "B1", "status": SeatState.AVAILABLE.value},
     ]
 
 
@@ -429,6 +506,29 @@ def test_show_price_requires_an_integer(price_paise):
             seats=["A1"],
             price_paise=price_paise,
         )
+
+
+@pytest.mark.parametrize(
+    "seats",
+    [[], [" "], ["A1", "A1"], ["A1", "A1 "]],
+)
+def test_show_requires_unique_nonblank_seat_labels(seats):
+    with pytest.raises(ValidationError):
+        CreateShowRequest(
+            name="friday-night",
+            seats=seats,
+            price_paise=25000,
+        )
+
+
+def test_show_contract_trims_seat_labels():
+    request = CreateShowRequest(
+        name="friday-night",
+        seats=[" A1 ", " B1"],
+        price_paise=25000,
+    )
+
+    assert request.seats == ["A1", "B1"]
 
 
 @pytest.mark.parametrize(

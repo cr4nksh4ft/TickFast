@@ -21,7 +21,9 @@ def create_show_route(
     _: AdminPrincipal,
 ) -> dict[str, object]:
     try:
-        return create_show_record(payload.name, payload.seats, payload.price_paise)
+        return create_show_record(
+            payload.name, payload.seats, payload.price_paise
+        )
     except (DatabaseConfigurationError, PeeweeException):
         logger.exception("Unable to create show")
         raise HTTPException(

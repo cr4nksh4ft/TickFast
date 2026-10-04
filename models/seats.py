@@ -44,7 +44,7 @@ def get_show_state(show_id: int) -> dict[str, object] | None:
 		seats = list(
 			Seat.select(Seat.label, Seat.status)
 			.where(Seat.show == show)
-			.order_by(Seat.label)
+			.order_by(Seat.id)
 			.dicts()
 		)
 
@@ -62,7 +62,9 @@ def get_show_state(show_id: int) -> dict[str, object] | None:
 	}
 
 
-def create_show(name: str, seat_labels: list[str], price_paise: int) -> dict[str, object]:
+def create_show(
+	name: str, seat_labels: list[str], price_paise: int
+) -> dict[str, object]:
 	database = get_database()
 	with database.connection_context(), database.atomic():
 		show = Show.create(name=name, price_paise=price_paise)

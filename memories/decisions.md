@@ -40,8 +40,14 @@ still planned.
 	require `sub`, `role`, `iss`, `aud`, `iat`, and `exp`, use a one-hour lifetime,
 	and validate the configured issuer/audience. Keep `JWT_SECRET` user-supplied,
 	at least 32 bytes, and out of version control.
+- Keep a local admin token in ignored `.env` as `ADMIN_TOKEN`; a local client
+	helper reads it and sends the Bearer header. The API continues validating JWT
+	signatures and claims using `JWT_SECRET` and does not read `ADMIN_TOKEN`.
 - Create a show and all its seats in one database transaction. Only admins may
 	call the creation route; public show reads remain unchanged.
+- Accept caller-supplied seat labels for show creation, matching the assignment
+	request contract. Require a nonempty list of unique, nonblank labels that fit
+	the database column; preserve their submitted order in the show response.
 
 ## Configuration and Migrations
 
