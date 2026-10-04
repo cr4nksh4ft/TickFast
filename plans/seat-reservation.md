@@ -10,6 +10,7 @@ Build, deploy, and operate a JSON API for assigned-seat reservations using FastA
 - A successful reservation is confirmed immediately. Use explicit owner-only cancellation rather than timed holds to avoid a background expiry worker in the one-day scope. Canceled seats become available again.
 - Keep Peewee, PyMySQL, and MySQL/InnoDB. Use explicit parameterized SQL where needed to make transaction boundaries, row locks, and uniqueness constraints clear.
 - Identity comes from signed bearer tokens, never request-body user IDs. Keep admin authorization separate from user authorization.
+- Persist local users with generated integer primary keys. Use the canonical decimal `users.id` as JWT `sub`; load persisted roles when minting tokens. Do not add public signup/password login unless a separate product requirement calls for it.
 - Keep the database as the system of record. Do not add Redis, payment processing, a UI, a waitlist, or multi-region writes.
 
 ## Implementation Sequence
@@ -26,11 +27,10 @@ Build, deploy, and operate a JSON API for assigned-seat reservations using FastA
 
 ## Dependencies
 
-Present in `pyproject.toml`: FastAPI, Peewee, PyMySQL, Uvicorn, and `python-dotenv`; dev dependencies include `httpx` and `pytest`.
+Present in `pyproject.toml`: FastAPI, PyJWT, Peewee, PyMySQL, Uvicorn, and `python-dotenv`; dev dependencies include `httpx` and `pytest`.
 
 Add:
 
-- `PyJWT` for signed bearer-token verification and local token generation.
 - `prometheus-client` for Prometheus metrics exposition.
 - `httpx` for the async burst client and FastAPI test transport.
 - `pytest` for tests; add `pytest-asyncio` only if async test functions are used.

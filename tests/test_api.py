@@ -1,17 +1,25 @@
 import os
 import subprocess
 import sys
+import time
 
+import jwt
 import pytest
+from fastapi import HTTPException
+from fastapi.security import HTTPAuthorizationCredentials
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from models import basemodel
 from models.basemodel import check_database_connection
+from models.users import User
+from scripts import create_user as create_user_script
+from scripts import mint_token as mint_token_script
 from tickfast.api import create_app
+from tickfast.api import auth
 from tickfast.api.routes import shows as show_routes
 from tickfast.api.schemas import CreateShowRequest, ReserveRequest
-from tickfast.states import SeatState
+from tickfast.states import SeatState, UserRole
 
 
 @pytest.fixture
@@ -148,6 +156,269 @@ def test_request_contract_rejects_duplicate_seats_and_identity_spoofing():
 
     with pytest.raises(ValidationError):
         ReserveRequest(seats=["A1"], user_id="another-user")
+
+
+def test_access_tokens_use_string_subject_and_one_hour_lifetime(monkeypatch):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.ADMIN.value),
+    )
+
+    token = auth.create_access_token(123)
+    claims = jwt.decode(
+        token,
+        secret,
+        algorithms=[auth.JWT_ALGORITHM],
+        audience=auth.JWT_AUDIENCE,
+        issuer=auth.JWT_ISSUER,
+    )
+
+    assert claims["sub"] == "123"
+    assert claims["role"] == UserRole.ADMIN.value
+    assert claims["exp"] - claims["iat"] == 3600
+
+
+def test_verified_principal_contains_integer_user_id(monkeypatch):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    token = auth.create_access_token(456)
+
+    principal = auth.get_current_principal(
+        HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+    )
+
+    assert principal.user_id == 456
+    assert type(principal.user_id) is int
+    assert principal.role is UserRole.USER
+
+
+@pytest.mark.parametrize("subject", ["0", "-1", "01", "user-1", "１２"])
+def test_verified_principal_rejects_noncanonical_user_ids(monkeypatch, subject):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    token = jwt.encode(
+        {
+            "sub": subject,
+            "role": UserRole.USER.value,
+            "iss": auth.JWT_ISSUER,
+            "aud": auth.JWT_AUDIENCE,
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        },
+        secret,
+        algorithm=auth.JWT_ALGORITHM,
+    )
+
+    with pytest.raises(HTTPException) as error:
+        auth.get_current_principal(
+            HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+        )
+
+    assert error.value.status_code == 401
+    assert error.value.detail["code"] == "invalid_token"
+
+
+def test_mint_token_cli_uses_persisted_user_id_and_role(monkeypatch, capsys):
+    secret = "s" * 32
+    user = User(id=789, role=UserRole.ADMIN.value)
+    lookups = []
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: lookups.append(user_id) or user,
+    )
+    monkeypatch.setattr(sys, "argv", ["mint_token", "--user-id", "789"])
+
+    assert mint_token_script.main() == 0
+    token = capsys.readouterr().out.strip()
+    claims = jwt.decode(
+        token,
+        secret,
+        algorithms=[auth.JWT_ALGORITHM],
+        audience=auth.JWT_AUDIENCE,
+        issuer=auth.JWT_ISSUER,
+    )
+
+    assert lookups == [789]
+    assert claims["sub"] == "789"
+    assert claims["role"] == UserRole.ADMIN.value
+
+
+def test_mint_token_cli_rejects_unknown_user(monkeypatch, capsys):
+    monkeypatch.setattr(auth, "get_user_by_id", lambda user_id: None)
+    monkeypatch.setattr(sys, "argv", ["mint_token", "--user-id", "999"])
+
+    with pytest.raises(SystemExit) as error:
+        mint_token_script.main()
+
+    assert error.value.code == 2
+    assert "No user found with id 999" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_role"),
+    [([], UserRole.USER), (["--role", "admin"], UserRole.ADMIN)],
+)
+def test_create_user_cli_uses_requested_persisted_role(
+    monkeypatch, capsys, arguments, expected_role
+):
+    created_roles = []
+
+    def create_user(role):
+        created_roles.append(role)
+        return User(id=321, role=role.value)
+
+    monkeypatch.setattr(create_user_script, "create_user", create_user)
+    monkeypatch.setattr(sys, "argv", ["create_user", *arguments])
+
+    assert create_user_script.main() == 0
+
+    assert created_roles == [expected_role]
+    assert capsys.readouterr().out == f"user_id=321 role={expected_role.value}\n"
+
+
+def test_show_creation_requires_a_bearer_token(monkeypatch, client):
+    def should_not_create_show(*args):
+        raise AssertionError("unauthenticated request reached show creation")
+
+    monkeypatch.setattr(show_routes, "create_show_record", should_not_create_show)
+
+    response = client.post(
+        "/shows",
+        json={"name": "friday-night", "seats": ["A1"], "price_paise": 25000},
+    )
+
+    assert response.status_code == 401
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert response.json()["detail"]["code"] == "authentication_required"
+
+
+def test_invalid_and_expired_tokens_are_rejected(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    expired_token = jwt.encode(
+        {
+            "sub": "admin-1",
+            "role": UserRole.ADMIN.value,
+            "iss": auth.JWT_ISSUER,
+            "aud": auth.JWT_AUDIENCE,
+            "iat": int(time.time()) - 7200,
+            "exp": int(time.time()) - 3600,
+        },
+        secret,
+        algorithm=auth.JWT_ALGORITHM,
+    )
+    wrong_signature_token = jwt.encode(
+        {
+            "sub": "admin-1",
+            "role": UserRole.ADMIN.value,
+            "iss": auth.JWT_ISSUER,
+            "aud": auth.JWT_AUDIENCE,
+            "iat": int(time.time()),
+            "exp": int(time.time()) + 3600,
+        },
+        "x" * 32,
+        algorithm=auth.JWT_ALGORITHM,
+    )
+
+    invalid_response = client.post(
+        "/shows",
+        headers={"Authorization": "Bearer not-a-jwt"},
+        json={"name": "friday-night", "seats": ["A1"], "price_paise": 25000},
+    )
+    expired_response = client.post(
+        "/shows",
+        headers={"Authorization": f"Bearer {expired_token}"},
+        json={"name": "friday-night", "seats": ["A1"], "price_paise": 25000},
+    )
+    wrong_signature_response = client.post(
+        "/shows",
+        headers={"Authorization": f"Bearer {wrong_signature_token}"},
+        json={"name": "friday-night", "seats": ["A1"], "price_paise": 25000},
+    )
+
+    assert invalid_response.status_code == 401
+    assert expired_response.status_code == 401
+    assert wrong_signature_response.status_code == 401
+    assert invalid_response.json()["detail"]["code"] == "invalid_token"
+    assert expired_response.json()["detail"]["code"] == "invalid_token"
+    assert wrong_signature_response.json()["detail"]["code"] == "invalid_token"
+
+
+def test_user_token_cannot_create_a_show(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    monkeypatch.setattr(
+        show_routes,
+        "create_show_record",
+        lambda *args: pytest.fail("user token reached admin-only service"),
+    )
+    token = auth.create_access_token(1)
+
+    response = client.post(
+        "/shows",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "friday-night", "seats": ["A1"], "price_paise": 25000},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"]["code"] == "forbidden"
+
+
+def test_admin_token_creates_show_and_returns_initial_seat_states(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.ADMIN.value),
+    )
+    monkeypatch.setattr(
+        show_routes,
+        "create_show_record",
+        lambda name, seats, price_paise: {
+            "id": 1,
+            "name": name,
+            "price_paise": price_paise,
+            "seats": [
+                {"label": label, "status": SeatState.AVAILABLE.value}
+                for label in seats
+            ],
+            "counts": {
+                SeatState.AVAILABLE.value: len(seats),
+                SeatState.HELD.value: 0,
+                SeatState.CONFIRMED.value: 0,
+            },
+            "total_seats": len(seats),
+        },
+    )
+    token = auth.create_access_token(2)
+
+    response = client.post(
+        "/shows",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"name": "friday-night", "seats": ["A1", "A2"], "price_paise": 25000},
+    )
+
+    assert response.status_code == 201
+    assert response.json()["seats"] == [
+        {"label": "A1", "status": SeatState.AVAILABLE.value},
+        {"label": "A2", "status": SeatState.AVAILABLE.value},
+    ]
 
 
 @pytest.mark.parametrize("price_paise", [25000.0, True])

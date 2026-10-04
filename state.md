@@ -6,7 +6,7 @@ Build and deploy a race-safe, observable FastAPI/MySQL seat reservation service.
 
 ## Current Status
 
-The FastAPI app factory, health endpoints, public show-read route, request contracts, lazy DB configuration, and initial versioned show/seat migrations are implemented. Authentication, protected writes, reservation transactions, MySQL migration verification, metrics, and deployment remain.
+The FastAPI app factory, health endpoints, public show-read route, request contracts, lazy DB configuration, versioned show/seat/user migrations, JWT authentication using database-generated user IDs, local user provisioning/token minting, and admin-only atomic show creation are implemented. Reservation transactions, live MySQL migration/user/show-creation verification, metrics, and deployment remain.
 
 ## Recent Changes
 | Date | Change | Files Affected |
@@ -16,3 +16,5 @@ The FastAPI app factory, health endpoints, public show-read route, request contr
 | 2026-10-04 | Centralized seat and reservation states in enums. | [`states.py`](tickfast/states.py), [`seats.py`](models/seats.py), [`schemas.py`](tickfast/api/schemas.py), [`test_api.py`](tests/test_api.py) |
 | 2026-10-04 | Added numbered SQL migrations and an explicit checksum-tracking runner. | [`001_create_shows.sql`](migrations/001_create_shows.sql), [`002_create_seats.sql`](migrations/002_create_seats.sql), [`runner.py`](migrations/runner.py), [`test_migrations.py`](tests/test_migrations.py) |
 | 2026-10-04 | Hardened paise/config validation and request-correlated 500s; documented migration recovery. | [`schemas.py`](tickfast/api/schemas.py), [`basemodel.py`](models/basemodel.py), [`app.py`](tickfast/api/app.py), [`README.md`](migrations/README.md), [`test_api.py`](tests/test_api.py) |
+| 2026-10-04 | Added HS256 bearer auth, local token minting, admin-only transactional show creation, and auth tests. | [`auth.py`](tickfast/api/auth.py), [`mint_token.py`](scripts/mint_token.py), [`shows.py`](tickfast/api/routes/shows.py), [`seats.py`](models/seats.py), [`test_api.py`](tests/test_api.py), [`README.md`](README.md) |
+| 2026-10-04 | Added users migration/model, local provisioning, and database-backed JWT subject IDs. | [`003_create_users.sql`](migrations/003_create_users.sql), [`users.py`](models/users.py), [`create_user.py`](scripts/create_user.py), [`mint_token.py`](scripts/mint_token.py), [`auth.py`](tickfast/api/auth.py), [`test_migrations.py`](tests/test_migrations.py), [`test_api.py`](tests/test_api.py) |

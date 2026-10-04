@@ -60,3 +60,25 @@ def get_show_state(show_id: int) -> dict[str, object] | None:
 		"counts": counts,
 		"total_seats": len(seats),
 	}
+
+
+def create_show(name: str, seat_labels: list[str], price_paise: int) -> dict[str, object]:
+	database = get_database()
+	with database.connection_context(), database.atomic():
+		show = Show.create(name=name, price_paise=price_paise)
+		Seat.insert_many(
+			[
+				{
+					"show": show,
+					"label": label,
+					"status": SeatState.AVAILABLE.value,
+				}
+				for label in seat_labels
+			]
+		).execute()
+		show_id = show.id
+
+	result = get_show_state(show_id)
+	if result is None:
+		raise RuntimeError("Created show could not be read")
+	return result

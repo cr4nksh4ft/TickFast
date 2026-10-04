@@ -1,6 +1,11 @@
 from enum import StrEnum
 
 
+class UserRole(StrEnum):
+    USER = "user"
+    ADMIN = "admin"
+
+
 class SeatState(StrEnum):
     AVAILABLE = "available"
     HELD = "held"

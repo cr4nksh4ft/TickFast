@@ -1,7 +1,7 @@
 # Project Decisions
 
-These are the adopted design choices for the seat-reservation service. Some are
-implemented in the current API slice; reservation/authentication behavior is
+These are the adopted design choices for the seat-reservation service. The API
+foundation and JWT/admin-show slices are implemented; reservation behavior is
 still planned.
 
 ## Stack and Data Store
@@ -29,6 +29,19 @@ still planned.
 	identity fields. Keep admin authorization separate from user authorization.
 - Show reads are public. Creating shows requires admin authorization;
 	reserving and canceling require user authentication.
+- Use the generated integer primary key of `users.id` as the identity. Encode
+	its canonical decimal representation as the JWT string `sub`; parse it into
+	an integer principal for application and reservation use.
+- Persist user roles as `user` or `admin`. The local token CLI looks up a user
+	row and derives both `sub` and role from that row; it cannot mint tokens for
+	arbitrary subjects or override a user's stored role.
+- Do not add public signup/login or token issuance in this slice. Provision
+	local users through a CLI. Sign access tokens with PyJWT and HS256 only;
+	require `sub`, `role`, `iss`, `aud`, `iat`, and `exp`, use a one-hour lifetime,
+	and validate the configured issuer/audience. Keep `JWT_SECRET` user-supplied,
+	at least 32 bytes, and out of version control.
+- Create a show and all its seats in one database transaction. Only admins may
+	call the creation route; public show reads remain unchanged.
 
 ## Configuration and Migrations
 
@@ -41,3 +54,5 @@ still planned.
 	inspect partial schema changes and add corrective migrations rather than
 	assuming a rollback is possible. The initial migrations require MySQL 8.0.16+
 	for enforced `CHECK` constraints.
+- Add users in a new forward migration; reservation ownership and per-user
+	usage must reference `users.id` rather than accepting identity from requests.
