@@ -5,6 +5,14 @@ import peewee as pw
 from models.basemodel import BaseModel, get_database
 from tickfast.states import SeatState
 
+_EFFECTIVE_SEAT_STATUS_SQL = """CASE
+	WHEN seats.status = 'held'
+		AND idempotency_results.hold_state = 'held'
+		AND idempotency_results.hold_expires_at <= CURRENT_TIMESTAMP(6)
+	THEN 'available'
+	ELSE seats.status
+END"""
+
 
 class Show(BaseModel):
 	name = pw.CharField()
@@ -42,15 +50,9 @@ def get_show_state(show_id: int) -> dict[str, object] | None:
 			return None
 
 		seat_rows = database.execute_sql(
-			"""
+			f"""
 			SELECT seats.label,
-				CASE
-					WHEN seats.status = 'held'
-						AND idempotency_results.hold_state = 'held'
-						AND idempotency_results.hold_expires_at <= CURRENT_TIMESTAMP(6)
-					THEN 'available'
-					ELSE seats.status
-				END AS status
+				{_EFFECTIVE_SEAT_STATUS_SQL} AS status
 			FROM seats
 			LEFT JOIN idempotency_results
 				ON idempotency_results.hold_id = seats.active_hold_id
@@ -77,6 +79,51 @@ def get_show_state(show_id: int) -> dict[str, object] | None:
 		"counts": counts,
 		"total_seats": len(seats),
 	}
+
+
+def get_recent_show_seat_counts(
+	limit: int = 50,
+) -> list[tuple[int, dict[str, int]]]:
+	if type(limit) is not int or not 1 <= limit <= 1000:
+		raise ValueError("show count limit must be between 1 and 1000")
+
+	database = get_database()
+	with database.connection_context():
+		rows = database.execute_sql(
+			f"""
+			WITH recent_shows AS (
+				SELECT id FROM shows ORDER BY id DESC LIMIT %s
+			), effective_seats AS (
+				SELECT recent_shows.id AS show_id,
+					{_EFFECTIVE_SEAT_STATUS_SQL} AS status
+				FROM recent_shows
+				LEFT JOIN seats ON seats.show_id = recent_shows.id
+				LEFT JOIN idempotency_results
+					ON idempotency_results.hold_id = seats.active_hold_id
+					AND idempotency_results.hold_state = 'held'
+			)
+			SELECT show_id,
+				SUM(status = 'available') AS available,
+				SUM(status = 'held') AS held,
+				SUM(status = 'confirmed') AS confirmed
+			FROM effective_seats
+			GROUP BY show_id
+			ORDER BY show_id DESC
+			""",
+			(limit,),
+		).fetchall()
+
+	return [
+		(
+			int(show_id),
+			{
+				"available": int(available or 0),
+				"held": int(held or 0),
+				"confirmed": int(confirmed or 0),
+			},
+		)
+		for show_id, available, held, confirmed in rows
+	]
 
 
 def create_show(

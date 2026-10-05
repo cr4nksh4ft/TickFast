@@ -15,7 +15,8 @@ from uuid import uuid4
 
 import peewee as pw
 
-from models.basemodel import get_database
+from models.basemodel import MYSQL_LOCK_WAIT_TIMEOUT_SECONDS, get_database
+from tickfast.metrics import record_reservation_outcome
 from tickfast.states import SeatState
 from utils.env import env
 
@@ -26,7 +27,6 @@ MAX_RETRIES = 3
 RETRY_BASE_SECONDS = 0.025
 RETRY_MAX_SECONDS = 0.25
 RETRY_TOTAL_SECONDS = 5.0
-MYSQL_LOCK_WAIT_TIMEOUT_SECONDS = 1
 MYSQL_NOWAIT_ERROR_CODE = 3572
 RETRYABLE_MYSQL_ERROR_CODES = {1205, 1213, 2006, 2013}
 HOLD_SWEEP_INTERVAL_SECONDS = 1.0
@@ -325,10 +325,6 @@ def _reservation_transaction(
         _reservation_capacity_metrics.connection_acquired(
             monotonic() - connection_started
         )
-        database.execute_sql(
-            "SET SESSION innodb_lock_wait_timeout = "
-            f"{MYSQL_LOCK_WAIT_TIMEOUT_SECONDS}"
-        )
         transaction_started = monotonic()
         try:
             with database.atomic():
@@ -419,7 +415,9 @@ def _lock_idempotency_row(
     return database.execute_sql(
         """
         SELECT request_hash, reservation_id, response_status, response_body,
-            hold_id, hold_state, hold_expires_at, updated_at
+            hold_id, hold_state, hold_expires_at, updated_at,
+            CURRENT_TIMESTAMP(6),
+            TIMESTAMPDIFF(MICROSECOND, updated_at, CURRENT_TIMESTAMP(6))
         FROM idempotency_results
         WHERE show_id = %s AND user_id = %s AND idempotency_key = %s
         FOR UPDATE
@@ -541,9 +539,7 @@ def _acquire_hold_once(
         if response_status != 0 or reservation_id is not None or response_body is not None:
             raise RuntimeError("Stored idempotency outcome is incomplete or invalid")
 
-        database_now = database.execute_sql(
-            "SELECT CURRENT_TIMESTAMP(6)"
-        ).fetchone()[0]
+        database_now = idempotency_row[8]
         current_hold_id = idempotency_row[4]
         current_hold_state = idempotency_row[5]
         current_hold_expiry = idempotency_row[6]
@@ -831,17 +827,10 @@ def _finalize_hold_once(lease: _HoldLease) -> ReservationOutcome | None:
             or _database_bytes(row[4]) != lease.hold_id
         ):
             return None
-        database_now = database.execute_sql(
-            "SELECT CURRENT_TIMESTAMP(6)"
-        ).fetchone()[0]
+        database_now = row[8]
         if row[6] <= database_now:
             return None
-        hold_duration_microseconds = int(
-            database.execute_sql(
-                "SELECT TIMESTAMPDIFF(MICROSECOND, %s, CURRENT_TIMESTAMP(6))",
-                (row[7],),
-            ).fetchone()[0]
-        )
+        hold_duration_microseconds = int(row[9])
 
         held_seats = database.execute_sql(
             """
@@ -995,9 +984,7 @@ def _expire_hold_once(
             return False
         if _database_bytes(row[4]) != hold_id:
             return False
-        database_now = database.execute_sql(
-            "SELECT CURRENT_TIMESTAMP(6)"
-        ).fetchone()[0]
+        database_now = row[8]
         if row[6] > database_now:
             return False
 
@@ -1197,7 +1184,7 @@ def reserve_seats(
 
     request_hash = _request_hash(labels)
     try:
-        return _with_transient_retries(
+        outcome = _with_transient_retries(
             lambda: _reserve_once(
                 show_id,
                 user_id,
@@ -1209,14 +1196,17 @@ def reserve_seats(
     except pw.OperationalError as error:
         error_code = _mysql_error_code(error)
         if error_code == MYSQL_NOWAIT_ERROR_CODE:
-            return _reservation_retry()
-        if error_code in RETRYABLE_MYSQL_ERROR_CODES:
+            outcome = _reservation_retry()
+        elif error_code in RETRYABLE_MYSQL_ERROR_CODES:
             logger.warning(
                 "Reservation deferred after transient contention",
                 extra={"show_id": show_id, "user_id": user_id},
             )
-            return _reservation_retry()
-        raise
+            outcome = _reservation_retry()
+        else:
+            raise
+    record_reservation_outcome(outcome)
+    return outcome
 
 
 def _cancel_once(reservation_id: int, user_id: int) -> ReservationOutcome:

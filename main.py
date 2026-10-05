@@ -1,4 +1,6 @@
 import copy
+import os
+from pathlib import Path
 
 import uvicorn
 from uvicorn.config import LOGGING_CONFIG
@@ -31,6 +33,19 @@ def api_port() -> int:
     return port
 
 
+def prepare_prometheus_multiprocess_dir() -> Path:
+    directory = Path(
+        os.environ.get("PROMETHEUS_MULTIPROC_DIR", "/tmp/tickfast-prometheus")
+    )
+    if directory.is_symlink():
+        raise RuntimeError("PROMETHEUS_MULTIPROC_DIR must not be a symlink")
+    directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for metric_file in directory.glob("*.db"):
+        metric_file.unlink()
+    os.environ["PROMETHEUS_MULTIPROC_DIR"] = str(directory)
+    return directory
+
+
 def log_config() -> dict:
     # Workers are spawned, so logging must be configured through Uvicorn, not basicConfig.
     config = copy.deepcopy(LOGGING_CONFIG)
@@ -39,6 +54,7 @@ def log_config() -> dict:
 
 
 def main() -> None:
+    prepare_prometheus_multiprocess_dir()
     uvicorn.run(
         "tickfast.api:app",
         host="0.0.0.0",

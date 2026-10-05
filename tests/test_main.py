@@ -43,6 +43,22 @@ def test_api_port_rejects_invalid_values(monkeypatch, value):
         main.api_port()
 
 
+def test_prepare_prometheus_directory_clears_stale_metric_files(monkeypatch, tmp_path):
+    metric_directory = tmp_path / "prometheus"
+    metric_directory.mkdir()
+    stale_metric_file = metric_directory / "counter_123.db"
+    unrelated_file = metric_directory / "keep.txt"
+    stale_metric_file.touch()
+    unrelated_file.touch()
+    monkeypatch.setenv("PROMETHEUS_MULTIPROC_DIR", str(metric_directory))
+
+    result = main.prepare_prometheus_multiprocess_dir()
+
+    assert result == metric_directory
+    assert not stale_metric_file.exists()
+    assert unrelated_file.exists()
+
+
 def test_log_config_routes_application_loggers_to_a_handler():
     config = main.log_config()
 

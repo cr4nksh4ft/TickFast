@@ -18,6 +18,7 @@ from models.reservations import (
 )
 from tickfast.api.auth import Principal, require_user
 from tickfast.api.schemas import ReservationResponse, ReserveRequest
+from tickfast.metrics import record_reservation_retry
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["reservations"])
@@ -51,6 +52,7 @@ async def reserve_show(
         )
     except TimeoutError:
         metrics.async_waiter_cancelled()
+        record_reservation_retry("admission_timeout")
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail={

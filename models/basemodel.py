@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 db = pw.DatabaseProxy()
 _database: PooledMySQLDatabase | None = None
 _database_lock = Lock()
+MYSQL_LOCK_WAIT_TIMEOUT_SECONDS = 1
 
 
 class DatabaseConfigurationError(RuntimeError):
@@ -65,6 +66,10 @@ def get_database() -> PooledMySQLDatabase:
                         "DB_MAX_CONNECTIONS", "20", 1
                     ),
                     stale_timeout=120,
+                    init_command=(
+                        "SET SESSION innodb_lock_wait_timeout = "
+                        f"{MYSQL_LOCK_WAIT_TIMEOUT_SECONDS}"
+                    ),
                 )
                 db.initialize(database)
                 _database = database

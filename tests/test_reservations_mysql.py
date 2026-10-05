@@ -11,7 +11,7 @@ from fastapi.testclient import TestClient
 
 from models import reservations
 from models.basemodel import get_database
-from models.seats import Seat, Show
+from models.seats import Seat, Show, get_recent_show_seat_counts, get_show_state
 from models.users import User
 from tickfast.api import auth
 from tickfast.api import create_app
@@ -144,6 +144,41 @@ def _assert_reconciled(show_id: int) -> dict[str, object]:
     assert sum(counts.values()) == state["total_seats"]
     assert counts[SeatState.HELD.value] == 0
     return state
+
+
+def test_metrics_seat_counts_match_show_state_with_expired_unswept_hold(
+    mysql_world,
+):
+    show_id = mysql_world["show_id"]
+    user_id = mysql_world["user_ids"][0]
+    _insert_test_hold(mysql_world, user_id, "metrics-expired-hold", ["A1"], -1)
+
+    state = get_show_state(show_id)
+    metric_counts = dict(get_recent_show_seat_counts())[show_id]
+
+    assert state is not None
+    assert metric_counts == state["counts"]
+    assert metric_counts[SeatState.AVAILABLE.value] == 10
+    assert metric_counts[SeatState.HELD.value] == 0
+
+
+def test_lock_wait_timeout_is_initialized_and_survives_pool_reuse(mysql_world):
+    database = mysql_world["database"]
+    database.close_idle()
+    with database.connection_context():
+        first_connection = database.connection()
+        first_timeout = database.execute_sql(
+            "SELECT @@SESSION.innodb_lock_wait_timeout"
+        ).fetchone()[0]
+
+    with database.connection_context():
+        assert database.connection() is first_connection
+        reused_timeout = database.execute_sql(
+            "SELECT @@SESSION.innodb_lock_wait_timeout"
+        ).fetchone()[0]
+
+    assert int(first_timeout) == reservations.MYSQL_LOCK_WAIT_TIMEOUT_SECONDS
+    assert int(reused_timeout) == reservations.MYSQL_LOCK_WAIT_TIMEOUT_SECONDS
 
 
 def _insert_test_hold(

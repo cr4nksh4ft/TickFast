@@ -19,8 +19,10 @@ from models.reservations import (
 )
 from starlette.concurrency import run_in_threadpool
 from tickfast.api.routes.health import router as health_router
+from tickfast.api.routes.metrics import router as metrics_router
 from tickfast.api.routes.reservations import router as reservations_router
 from tickfast.api.routes.shows import router as shows_router
+from tickfast.metrics import record_http_request
 
 logger = logging.getLogger("tickfast.request")
 
@@ -53,6 +55,7 @@ def create_app() -> FastAPI:
         MAX_CONCURRENT_RESERVATION_TRANSACTIONS
     )
     app.include_router(health_router)
+    app.include_router(metrics_router)
     app.include_router(shows_router)
     app.include_router(reservations_router)
 
@@ -86,6 +89,12 @@ def create_app() -> FastAPI:
                 headers={"X-Request-ID": request_id},
             )
         response.headers["X-Request-ID"] = request_id
+        route = request.scope.get("route")
+        record_http_request(
+            request.method,
+            getattr(route, "path", "unmatched"),
+            response.status_code,
+        )
         logger.info(
             json.dumps(
                 {
