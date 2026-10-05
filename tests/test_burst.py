@@ -130,6 +130,42 @@ def test_build_attempts_reuses_key_user_and_seat_for_retries():
         assert len({attempt.seat for attempt in attempts_for_key}) == 1
 
 
+def test_parse_arguments_defaults_and_accepts_zero_retries(monkeypatch):
+    monkeypatch.setattr(burst.sys, "argv", ["burst"])
+    arguments = burst._parse_arguments()
+
+    assert arguments.max_retries == 3
+    assert arguments.timeout == 60.0
+
+    monkeypatch.setattr(
+        burst.sys,
+        "argv",
+        ["burst", "--max-retries", "0", "--timeout", "2"],
+    )
+    arguments = burst._parse_arguments()
+
+    assert arguments.max_retries == 0
+    assert arguments.timeout == 2.0
+
+
+def test_parse_arguments_rejects_retry_deadline(monkeypatch):
+    monkeypatch.setattr(
+        burst.sys, "argv", ["burst", "--retry-deadline", "2"]
+    )
+
+    with pytest.raises(SystemExit):
+        burst._parse_arguments()
+
+
+def test_parse_arguments_rejects_negative_max_retries(monkeypatch):
+    monkeypatch.setattr(
+        burst.sys, "argv", ["burst", "--max-retries", "-1"]
+    )
+
+    with pytest.raises(SystemExit):
+        burst._parse_arguments()
+
+
 def test_report_deduplicates_successful_replays_and_counts_declines(capsys):
     first_user = BurstUser(1, "token-1")
     second_user = BurstUser(2, "token-2")
@@ -260,7 +296,6 @@ def test_send_attempts_retries_ambiguous_transport_and_live_hold_same_key(
             31,
             [attempt],
             concurrency=1,
-            retry_deadline_seconds=1,
             max_retries=3,
         )
     )
@@ -268,36 +303,31 @@ def test_send_attempts_retries_ambiguous_transport_and_live_hold_same_key(
     assert peak_in_flight == 1
     assert results[0].status_code == 201
     assert results[0].retry_attempts == 3
+    assert results[0].transport_retries == 1
     assert len(calls) == 4
     assert all(call[1]["Idempotency-Key"] == "retry-same-key" for call in calls)
     assert all(call[2] == {"seats": ["A1"]} for call in calls)
 
 
-def test_send_attempts_retries_past_old_cap_using_retry_hint(monkeypatch):
+def test_send_attempts_stops_retrying_at_max_retries(monkeypatch):
     user = BurstUser(7, "token")
-    attempt = Attempt(user, "A1", "retry-past-old-cap")
+    attempt = Attempt(user, "A1", "retry-stops-at-cap")
     calls = []
     delays = []
 
-    class RecoveringClient:
+    class ContendedClient:
         async def post(self, path, *, headers, json):
             calls.append((path, headers.copy(), json.copy()))
             request = httpx.Request("POST", f"http://testserver{path}")
-            if len(calls) <= 10:
-                return httpx.Response(
-                    409,
-                    json={
-                        "detail": {
-                            "code": "reservation_retry",
-                            "retry_after_ms": 50,
-                        }
-                    },
-                    headers={"Retry-After": "1"},
-                    request=request,
-                )
             return httpx.Response(
-                201,
-                json={"reservation_id": 101},
+                409,
+                json={
+                    "detail": {
+                        "code": "reservation_retry",
+                        "retry_after_ms": 50,
+                    },
+                },
+                headers={"Retry-After": "1"},
                 request=request,
             )
 
@@ -308,20 +338,50 @@ def test_send_attempts_retries_past_old_cap_using_retry_hint(monkeypatch):
     monkeypatch.setattr(burst.asyncio, "sleep", record_sleep)
     results, _ = asyncio.run(
         burst.send_attempts(
-            RecoveringClient(),
+            ContendedClient(),
             31,
             [attempt],
             concurrency=1,
-            retry_deadline_seconds=1,
+            max_retries=2,
         )
     )
 
-    assert results[0].status_code == 201
-    assert results[0].retry_attempts == 10
-    assert len(calls) == 11
+    assert results[0].status_code == 409
+    assert results[0].retry_attempts == 2
+    assert len(calls) == 3
     assert delays[0] == pytest.approx(0.075)
-    assert all(call[1]["Idempotency-Key"] == "retry-past-old-cap" for call in calls)
+    assert all(call[1]["Idempotency-Key"] == "retry-stops-at-cap" for call in calls)
     assert all(call[2] == {"seats": ["A1"]} for call in calls)
+
+
+def test_send_attempts_zero_max_retries_makes_one_request():
+    user = BurstUser(7, "token")
+    attempt = Attempt(user, "A1", "no-retries")
+    calls = []
+
+    class ContendedClient:
+        async def post(self, path, *, headers, json):
+            calls.append(path)
+            request = httpx.Request("POST", f"http://testserver{path}")
+            return httpx.Response(
+                503,
+                json={"detail": {"code": "reservation_unavailable"}},
+                request=request,
+            )
+
+    results, _ = asyncio.run(
+        burst.send_attempts(
+            ContendedClient(),
+            31,
+            [attempt],
+            concurrency=1,
+            max_retries=0,
+        )
+    )
+
+    assert results[0].status_code == 503
+    assert results[0].retry_attempts == 0
+    assert len(calls) == 1
 
 
 def _fake_chunk_runner(
@@ -330,15 +390,18 @@ def _fake_chunk_runner(
     show_id,
     attempts,
     concurrency,
-    retry_deadline_seconds,
     started_at,
     first_index,
+    max_retries,
 ):
     results = [
         AttemptResult(
             attempt,
             409,
-            {"detail": {"code": "seat_taken"}},
+            {
+                "detail": {"code": "seat_taken"},
+                "max_retries": max_retries,
+            },
             request_index=first_index + position,
             retry_attempts=concurrency,
         )
@@ -358,10 +421,10 @@ def test_send_attempts_in_processes_splits_and_merges_in_order():
             31,
             attempts,
             concurrency=7,
-            retry_deadline_seconds=1.0,
             processes=3,
             started_at=0.0,
             chunk_runner=_fake_chunk_runner,
+            max_retries=6,
         )
     )
 
@@ -370,6 +433,7 @@ def test_send_attempts_in_processes_splits_and_merges_in_order():
     # 3 processes share a concurrency cap of 7 as 3 + 2 + 2.
     assert peak_in_flight == 7
     assert [result.retry_attempts for result in results] == [3] * 4 + [2] * 4 + [2] * 2
+    assert all(result.body["max_retries"] == 6 for result in results)
 
 
 def test_send_attempts_in_processes_never_uses_more_processes_than_requests():
@@ -382,7 +446,6 @@ def test_send_attempts_in_processes_never_uses_more_processes_than_requests():
             31,
             attempts,
             concurrency=500,
-            retry_deadline_seconds=1.0,
             processes=4,
             started_at=0.0,
             chunk_runner=_fake_chunk_runner,
@@ -391,6 +454,7 @@ def test_send_attempts_in_processes_never_uses_more_processes_than_requests():
 
     assert len(results) == 1
     assert peak_in_flight == 500
+    assert results[0].body["max_retries"] == 3
 
 
 def test_write_metrics_emits_request_samples_and_summary(tmp_path):
@@ -426,7 +490,8 @@ def test_write_metrics_emits_request_samples_and_summary(tmp_path):
             concurrency=2,
             users=2,
             retry_percent=5.0,
-            retry_deadline=60.0,
+            max_retries=3,
+            timeout=60.0,
             processes=1,
         ),
         results,
@@ -461,4 +526,5 @@ def test_write_metrics_emits_request_samples_and_summary(tmp_path):
     assert events[3]["reconciliation_passed"] is True
     assert events[3]["retry_attempts"] == 1
     assert events[3]["recovery_successes"] == 1
-    assert events[3]["retry_deadline_seconds"] == 60.0
+    assert events[3]["max_retries"] == 3
+    assert events[3]["timeout_seconds"] == 60.0

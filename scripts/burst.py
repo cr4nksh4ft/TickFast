@@ -49,6 +49,7 @@ class AttemptResult:
     started_offset_seconds: float | None = None
     completed_offset_seconds: float | None = None
     retry_attempts: int = 0
+    transport_retries: int = 0
 
 
 def build_attempts(
@@ -225,6 +226,7 @@ def _write_metrics(
                         "idempotency_key": result.attempt.idempotency_key,
                         "planned_retry": result.attempt.is_retry,
                         "retry_attempts": result.retry_attempts,
+                        "transport_retries": result.transport_retries,
                         "status_code": result.status_code,
                         "decline_code": code,
                         "transport_error": result.error,
@@ -250,8 +252,10 @@ def _write_metrics(
             "processes": arguments.processes,
             "users": arguments.users,
             "retry_percent": arguments.retry_percent,
-            "retry_deadline_seconds": arguments.retry_deadline,
+            "max_retries": arguments.max_retries,
+            "timeout_seconds": arguments.timeout,
             "retry_attempts": sum(result.retry_attempts for result in results),
+            "transport_retries": sum(result.transport_retries for result in results),
             "recovery_successes": sum(
                 result.retry_attempts > 0 and result.status_code == 201
                 for result in results
@@ -284,8 +288,7 @@ async def send_attempts(
     show_id: int,
     attempts: list[Attempt],
     concurrency: int,
-    retry_deadline_seconds: float = 60.0,
-    max_retries: int | None = None,
+    max_retries: int = 3,
     started_at: float | None = None,
     first_index: int = 1,
 ) -> tuple[list[AttemptResult], int]:
@@ -321,33 +324,19 @@ async def send_attempts(
             request_started_at = time.perf_counter()
             started_offset_seconds = request_started_at - started_at
             retry_attempts = 0
-            retry_deadline = asyncio.get_running_loop().time() + retry_deadline_seconds
+            transport_retries = 0
             while True:
-                remaining = retry_deadline - asyncio.get_running_loop().time()
-                if remaining <= 0:
-                    mark_completed()
-                    return AttemptResult(
-                        attempt,
-                        None,
-                        error="RetryDeadlineExceeded",
-                        elapsed_ms=(time.perf_counter() - request_started_at) * 1000,
-                        request_index=index,
-                        retry_attempts=retry_attempts,
-                        started_offset_seconds=started_offset_seconds,
-                        completed_offset_seconds=time.perf_counter() - started_at,
-                    )
                 try:
-                    async with asyncio.timeout(remaining):
-                        response = await client.post(
-                            f"/shows/{show_id}/reserve",
-                            headers={
-                                "Authorization": f"Bearer {attempt.user.token}",
-                                "Idempotency-Key": attempt.idempotency_key,
-                            },
-                            json={"seats": [attempt.seat]},
-                        )
+                    response = await client.post(
+                        f"/shows/{show_id}/reserve",
+                        headers={
+                            "Authorization": f"Bearer {attempt.user.token}",
+                            "Idempotency-Key": attempt.idempotency_key,
+                        },
+                        json={"seats": [attempt.seat]},
+                    )
                 except (httpx.HTTPError, TimeoutError) as exc:
-                    if max_retries is not None and retry_attempts >= max_retries:
+                    if retry_attempts >= max_retries:
                         elapsed_ms = (time.perf_counter() - request_started_at) * 1000
                         LOGGER.debug(
                             "Transport failure request=%d/%d user_id=%d seat=%s "
@@ -370,16 +359,13 @@ async def send_attempts(
                             elapsed_ms=elapsed_ms,
                             request_index=index,
                             retry_attempts=retry_attempts,
+                            transport_retries=transport_retries,
                             started_offset_seconds=started_offset_seconds,
                             completed_offset_seconds=time.perf_counter() - started_at,
                         )
-                    remaining = retry_deadline - asyncio.get_running_loop().time()
-                    if remaining <= 0:
-                        continue
-                    await asyncio.sleep(
-                        _retry_delay_seconds(retry_attempts, remaining)
-                    )
+                    await asyncio.sleep(_retry_delay_seconds(retry_attempts))
                     retry_attempts += 1
+                    transport_retries += 1
                     continue
                 try:
                     body = response.json()
@@ -392,26 +378,20 @@ async def send_attempts(
                     "reservation_retry",
                     "reservation_unavailable",
                 } or response.status_code == 503
-                if retryable_response and (
-                    max_retries is None or retry_attempts < max_retries
-                ):
-                    remaining = retry_deadline - asyncio.get_running_loop().time()
-                    if remaining > 0:
-                        retry_after_ms = (
-                            detail.get("retry_after_ms")
-                            if isinstance(detail, dict)
-                            else None
-                        )
-                        delay_seconds = _retry_delay_seconds(
-                            retry_attempts,
-                            remaining,
-                            retry_after_ms=retry_after_ms,
-                            retry_after_header=response.headers.get("Retry-After"),
-                        )
-                        if delay_seconds < remaining:
-                            await asyncio.sleep(delay_seconds)
-                            retry_attempts += 1
-                            continue
+                if retryable_response and retry_attempts < max_retries:
+                    retry_after_ms = (
+                        detail.get("retry_after_ms")
+                        if isinstance(detail, dict)
+                        else None
+                    )
+                    delay_seconds = _retry_delay_seconds(
+                        retry_attempts,
+                        retry_after_ms=retry_after_ms,
+                        retry_after_header=response.headers.get("Retry-After"),
+                    )
+                    await asyncio.sleep(delay_seconds)
+                    retry_attempts += 1
+                    continue
                 elapsed_ms = (time.perf_counter() - request_started_at) * 1000
                 if response.status_code not in (201, 409):
                     LOGGER.debug(
@@ -435,6 +415,7 @@ async def send_attempts(
                     request_index=index,
                     request_id=response.headers.get("X-Request-ID"),
                     retry_attempts=retry_attempts,
+                    transport_retries=transport_retries,
                     started_offset_seconds=started_offset_seconds,
                     completed_offset_seconds=time.perf_counter() - started_at,
                 )
@@ -454,9 +435,9 @@ def _send_chunk(
     show_id: int,
     attempts: list[Attempt],
     concurrency: int,
-    retry_deadline_seconds: float,
     started_at: float,
     first_index: int,
+    max_retries: int = 3,
 ) -> tuple[list[AttemptResult], int]:
     async def run() -> tuple[list[AttemptResult], int]:
         limits = httpx.Limits(
@@ -471,7 +452,7 @@ def _send_chunk(
                 show_id,
                 attempts,
                 concurrency,
-                retry_deadline_seconds=retry_deadline_seconds,
+                max_retries=max_retries,
                 started_at=started_at,
                 first_index=first_index,
             )
@@ -485,10 +466,10 @@ async def send_attempts_in_processes(
     show_id: int,
     attempts: list[Attempt],
     concurrency: int,
-    retry_deadline_seconds: float,
     processes: int,
     started_at: float,
     chunk_runner=_send_chunk,
+    max_retries: int = 3,
 ) -> tuple[list[AttemptResult], int]:
     chunk_count = max(1, min(processes, len(attempts), concurrency))
     chunk_size = math.ceil(len(attempts) / chunk_count)
@@ -511,9 +492,9 @@ async def send_attempts_in_processes(
                     show_id,
                     chunk,
                     base_concurrency + (1 if position < extra else 0),
-                    retry_deadline_seconds,
                     started_at,
                     offset + 1,
+                    max_retries,
                 )
                 for position, (offset, chunk) in enumerate(chunks)
             )
@@ -525,7 +506,6 @@ async def send_attempts_in_processes(
 
 def _retry_delay_seconds(
     retry_attempts: int,
-    remaining_seconds: float,
     *,
     retry_after_ms: object = None,
     retry_after_header: str | None = None,
@@ -542,10 +522,7 @@ def _retry_delay_seconds(
             pass
 
     jitter_cap = min(0.25, 0.05 * (2**retry_attempts))
-    return min(
-        minimum_delay + random.uniform(0, jitter_cap),
-        remaining_seconds,
-    )
+    return minimum_delay + random.uniform(0, jitter_cap)
 
 
 async def run_burst(
@@ -614,9 +591,9 @@ async def run_burst(
                 show_id,
                 attempts,
                 arguments.concurrency,
-                arguments.retry_deadline,
                 arguments.processes,
                 burst_started_at,
+                max_retries=arguments.max_retries,
             )
         else:
             results, peak_in_flight = await send_attempts(
@@ -624,7 +601,7 @@ async def run_burst(
                 show_id,
                 attempts,
                 arguments.concurrency,
-                retry_deadline_seconds=arguments.retry_deadline,
+                max_retries=arguments.max_retries,
                 started_at=burst_started_at,
             )
         sample_stop.set()
@@ -727,7 +704,11 @@ def report_results(
     for error_type, count in sorted(transport_errors.items()):
         print(f"  {error_type}: {count:,}")
     print(f"Mismatched same-key outcomes: {mismatched_replay_keys:,}")
-    print(f"Retry attempts: {retry_attempts:,}")
+    transport_retries = sum(result.transport_retries for result in results)
+    print(
+        f"Retry attempts: {retry_attempts:,} (retryable responses: "
+        f"{retry_attempts - transport_retries:,}, transport: {transport_retries:,})"
+    )
     print(f"Retry recoveries: {retry_recoveries:,}")
 
     counts = final_state.get("counts", {})
@@ -798,15 +779,15 @@ def _parse_arguments() -> argparse.Namespace:
         help="client processes sharing the concurrency cap; one process saturates a CPU core",
     )
     parser.add_argument("--retry-percent", type=float, default=5.0)
+    parser.add_argument(
+        "--max-retries",
+        type=int,
+        default=3,
+        help="maximum additional same-key requests per attempt",
+    )
     parser.add_argument("--seats", nargs="+", default=list(DEFAULT_SEATS))
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--timeout", type=float, default=60.0)
-    parser.add_argument(
-        "--retry-deadline",
-        type=float,
-        default=60.0,
-        help="total time budget per attempt, including same-key retries",
-    )
     parser.add_argument(
         "--metrics-file",
         type=Path,
@@ -831,8 +812,8 @@ def _parse_arguments() -> argparse.Namespace:
         parser.error("--retry-percent must be between 0 and 50")
     if arguments.timeout <= 0:
         parser.error("--timeout must be positive")
-    if arguments.retry_deadline <= 0:
-        parser.error("--retry-deadline must be positive")
+    if arguments.max_retries < 0:
+        parser.error("--max-retries must be nonnegative")
     if arguments.db_sample_interval <= 0:
         parser.error("--db-sample-interval must be positive")
     arguments.seats = [seat.strip() for seat in arguments.seats]
