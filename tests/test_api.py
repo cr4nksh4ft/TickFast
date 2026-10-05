@@ -165,7 +165,7 @@ def test_show_contract_rejects_spoofed_seats_and_identity():
         ReserveRequest(seats=["A1"], user_id="another-user")
 
 
-def test_access_tokens_use_string_subject_and_one_hour_lifetime(monkeypatch):
+def test_access_tokens_use_string_subject_and_30_day_lifetime(monkeypatch):
     secret = "s" * 32
     monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
     monkeypatch.setattr(
@@ -185,7 +185,7 @@ def test_access_tokens_use_string_subject_and_one_hour_lifetime(monkeypatch):
 
     assert claims["sub"] == "123"
     assert claims["role"] == UserRole.ADMIN.value
-    assert claims["exp"] - claims["iat"] == 3600
+    assert claims["exp"] - claims["iat"] == 30 * 24 * 60 * 60
 
 
 def test_verified_principal_contains_integer_user_id(monkeypatch):

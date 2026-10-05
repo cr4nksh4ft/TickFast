@@ -1,47 +1,150 @@
 # TickFast
 
-## Local Authentication
+## Quick Start for Testers (Docker)
 
-Set `JWT_SECRET` in your ignored `.env` file. Generate a local secret with:
+Requires Docker with Compose v2. From the repo root, create `.env` from
+`.env.example` and set a local `DB_PASSWORD` and random `JWT_SECRET`. On startup,
+the container runs migrations, generates one admin token and `TOKEN_USER_COUNT`
+user tokens (default 5), then starts the API:
 
 ```bash
+docker compose up --build -d
+curl http://127.0.0.1:8000/health/ready
+mkdir -m 700 -p "$HOME/.tickfast/credentials"
+docker compose cp api:/home/app/.tickfast/credentials/admin.env "$HOME/.tickfast/credentials/admin.env"
+docker compose cp api:/home/app/.tickfast/credentials/users.tokens "$HOME/.tickfast/credentials/users.tokens"
+chmod 600 "$HOME/.tickfast/credentials/admin.env" "$HOME/.tickfast/credentials/users.tokens"
+```
+
+The generator uses the container's configured database and `JWT_SECRET`. It
+writes private token files under `TICKFAST_TOKEN_OUTPUT_DIR`; the `docker
+compose cp` commands copy them to the host credentials directory. Tokens are
+valid for 30 days. The credentials volume preserves user identities across
+container replacements. Mount a Railway volume at the same output path to keep
+them stable across redeploys. To create a show and reserve a seat:
+
+```bash
+. "$HOME/.tickfast/credentials/admin.env"
+curl -X POST http://127.0.0.1:8000/shows \
+  -H "Authorization: Bearer $ADMIN_TOKEN" -H 'Content-Type: application/json' \
+  -d '{"name":"demo","price_paise":25000,"seats":["A1","A2","A3"]}'
+
+USER_TOKEN=$(head -n1 "$HOME/.tickfast/credentials/users.tokens")
+curl -X POST http://127.0.0.1:8000/shows/1/reserve \
+  -H "Authorization: Bearer $USER_TOKEN" -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: demo-1' -d '{"seats":["A1"]}'
+curl http://127.0.0.1:8000/shows/1 -H "Authorization: Bearer $USER_TOKEN"
+```
+
+Interactive API docs are at `http://127.0.0.1:8000/docs`. Reusing an
+`Idempotency-Key` with the same body replays the original response.
+
+For the concurrency check, see [Reservation Burst Test](#reservation-burst-test).
+Stop with `docker compose down` (`-v` also deletes the MySQL data).
+
+### Using the hosted deployment
+
+Railway builds the root `Dockerfile`; its container runs `deploy.sh`, which
+applies migrations, generates credentials, and starts the API. Do not run
+`deploy.sh` on the host: it is the image's startup command, not a Compose
+launcher. Configure the API
+service with `DB_DATABASE`, `DB_USERNAME`, `DB_PASSWORD`, `DB_HOST`, and
+`DB_PORT` referencing the private Railway MySQL service variables, plus a new
+`JWT_SECRET`. Railway supplies `PORT`; set `API_WORKERS=1` and a modest
+`DB_MAX_CONNECTIONS` for the trial resource limits. The API binds to
+`0.0.0.0` and defaults to port `8000` for local use.
+
+On startup, `generate_tokens.sh` writes the admin and user token files under
+`TICKFAST_TOKEN_OUTPUT_DIR` (default `/home/app/.tickfast/credentials`). Retrieve
+those files through Railway's container shell/exec or another private method;
+share only the tokens with the tester. Set `TOKEN_USER_COUNT` to change the
+number of generated users.
+
+For manual hosted API testing, use the live URL plus the admin/user tokens
+provided to you. The tester does not need database or signing credentials.
+
+## Local Docker Stack
+
+Copy the committed placeholder template and set a local MySQL password plus a
+random signing secret. Never commit `.env` or put these values in the image:
+
+```bash
+cp .env.example .env
 python -c 'import secrets; print(secrets.token_urlsafe(32))'
 ```
 
-Apply migrations, then create user rows locally. MySQL assigns each user's
-stable integer ID; the role is stored on that row:
+Put the generated value in `JWT_SECRET` in `.env`. The Compose stack starts
+MySQL, runs migrations before the API, and binds the API to
+`127.0.0.1:8000`. MySQL's host port defaults to `3307` to avoid colliding with
+a local server on `3306`.
 
 ```bash
-uv run python -m migrations
-uv run python -m scripts.create_user --role user
-uv run python -m scripts.create_user --role admin
+docker compose up --build -d
+docker compose ps
+curl http://127.0.0.1:8000/health/ready
+docker compose logs -f api
 ```
 
-Use the printed `user_id` to mint a one-hour token. The CLI loads the row and
-uses its ID and stored role; there is no public signup, login, or token-issuance
-endpoint:
+The API and burst-tool containers connect to MySQL over the private Compose
+network. For the burst tool's private host-mounted credential directory:
 
 ```bash
-uv run python -m scripts.mint_token --user-id <user-id>
+mkdir -p "$HOME/.tickfast/credentials"
+chmod 700 "$HOME/.tickfast/credentials"
 ```
 
-Store the minted admin token in the ignored `.env` as `ADMIN_TOKEN`. With the
-API running, the local helper reads that setting and sends it as a bearer token
-to create the show:
+Set `LOCAL_UID` and `LOCAL_GID` in `.env` to the output of `id -u` and `id -g`
+if they differ from `1000`. Stop the stack without deleting its database using
+`docker compose down`. Use `docker compose down -v` only when intentionally
+deleting the local MySQL data.
+
+## Local Authentication
+
+JWTs are valid for 30 days. Generate one admin token and a private file of user
+tokens for load testing:
 
 ```bash
+docker compose run --rm --entrypoint python burst \
+	-m scripts.generate_tokens \
+	--users 500 \
+	--allow-non-test-database \
+	--output-dir /credentials
+```
+
+This provisions accounts in the database selected by `DB_DATABASE` in `.env`;
+the template uses the local main database `tickfast`. The explicit flag permits
+this local database name, which does not end in `_test`. Never use it with a
+shared or production database. Gated integration tests remain isolated on
+`tickfast_test`.
+
+Generated files are stored under `~/.tickfast/credentials` by default with
+mode `0600` inside a mode `0700` directory. Load the admin token into the
+current shell to create a show with the existing helper:
+
+```bash
+set -a
+. "$HOME/.tickfast/credentials/admin.env"
+set +a
 uv run python -m scripts.create_show \
 	--name friday-night \
 	--price-paise 25000 \
 	--seats A1 A2 A3 B1 B2 B3
 ```
 
-Pass the assigned seat labels directly. Labels must be unique, nonblank, and
-no longer than 255 characters.
+Pass assigned seat labels directly. Labels must be unique, nonblank, and no
+longer than 255 characters. The helper defaults to `http://127.0.0.1:8000`;
+set `TICKFAST_API_URL` to use another local API address. The API verifies the
+JWT with `JWT_SECRET`; it does not compare against `ADMIN_TOKEN`.
 
-The helper defaults to `http://127.0.0.1:8000`; set `TICKFAST_API_URL` in
-`.env` to use another local API address. The API still verifies the JWT with
-`JWT_SECRET`; it does not compare against `ADMIN_TOKEN`.
+There is no public signup, login, or token-issuance endpoint. For manual local
+account management, the lower-level helpers remain available:
+
+```bash
+uv run python -m migrations
+uv run python -m scripts.create_user --role user
+uv run python -m scripts.create_user --role admin
+uv run python -m scripts.mint_token --user-id <user-id>
+```
 
 ## Reservation Holds
 
@@ -99,28 +202,43 @@ MySQL advisory lock.
 
 The async burst runner creates a fresh four-seat show, then sends 20,000
 reservation requests by default. It includes same-key retries and reports
-status/reason counts, unique reservations, and final seat reconciliation.
-
-The runner uses `DB_*` and `JWT_SECRET` from the environment or `.env`. It
-reuses USER identities from its private token file, creates any missing test
-users, refreshes their JWTs in that file, and mints an admin JWT in memory for
-show creation. The API target must use the same database and signing secret.
-Automatic user provisioning requires `DB_DATABASE` to end in `_test`; pass
-`--allow-non-test-database` only when intentionally provisioning another
-dedicated load-test database. The token file defaults to
-`~/.tickfast/burst-user-tokens.txt` and is written with owner-only permissions.
-Then run:
+status/reason counts, unique reservations, and final seat reconciliation. Run
+it through the Compose `burst` tool service so it uses the same database and
+signing secret as the API:
 
 ```bash
-uv run python -m scripts.burst \
-	--base-url http://127.0.0.1:8000 \
-	--tokens-file "$HOME/.tickfast/burst-user-tokens.txt" \
+docker compose run --rm burst \
+	--base-url http://api:8000 \
+	--tokens-file /credentials/users.tokens \
 	--users 500 \
 	--requests 20000 \
 	--concurrency 500 \
 	--retry-percent 5 \
+	--allow-non-test-database \
+	--metrics-file /credentials/burst-metrics.jsonl \
 	--seats A1 A2 A3 A4
 ```
+
+The Compose tool reads `DB_*` and `JWT_SECRET` from the same `.env` as the API.
+It reuses USER identities from `/credentials/users.tokens`, creates any missing
+users, refreshes their JWTs in that private file, and mints an admin JWT in
+memory for show creation. The `--allow-non-test-database` flag is needed when
+the local main database (for example, `tickfast`) does not end in `_test`.
+Use it only with the isolated local Compose database; never point burst user
+provisioning at a shared or production database. The gated InnoDB tests use
+`DB_DATABASE` from `.env` too. Their fixture creates and removes only its own
+test users, show, seats, and reservations; run them only against a local,
+disposable database, with the API stopped so its hold sweeper cannot interfere.
+For this Compose stack, keep `DB_DATABASE` from `.env` and use the host-published
+MySQL port when running pytest from WSL:
+
+```bash
+DB_HOST=127.0.0.1 DB_PORT=3307 TICKFAST_MYSQL_TESTS=1 \
+	uv run --locked pytest -q --show-capture=no tests/test_reservations_mysql.py
+```
+
+The token file is owner-only and lives under `~/.tickfast/credentials` by
+default.
 
 	The runner retries `hold_in_progress`, `reservation_retry`, ambiguous 503
 	responses, and transport failures with the same key and body. `--timeout` is

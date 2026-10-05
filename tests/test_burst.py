@@ -10,7 +10,7 @@ import httpx
 import jwt
 import pytest
 
-from scripts import burst
+from scripts import burst, credentials
 from scripts.burst import (
     Attempt,
     AttemptResult,
@@ -59,10 +59,10 @@ def test_prepare_credentials_mints_admin_and_refreshes_private_tokens(
             type("UserRow", (), {"id": 9})(),
         ]
     )
-    monkeypatch.setattr(burst, "env", lambda name: "tickfast_test")
+    monkeypatch.setattr(credentials, "env", lambda name: "tickfast_test")
     initialized = []
     monkeypatch.setattr(
-        burst,
+        credentials,
         "get_database",
         lambda: initialized.append(True),
     )
@@ -72,17 +72,17 @@ def test_prepare_credentials_mints_admin_and_refreshes_private_tokens(
         return next(user_rows)
 
     monkeypatch.setattr(
-        burst.User,
+        credentials.User,
         "get_or_none",
         get_user_or_none,
     )
     monkeypatch.setattr(
-        burst,
+        credentials,
         "create_access_token",
         lambda user_id: f"fresh-token-{user_id}",
     )
     monkeypatch.setattr(
-        burst,
+        credentials,
         "create_user",
         lambda role: pytest.fail("existing users should be reused"),
     )
@@ -102,9 +102,9 @@ def test_prepare_credentials_mints_admin_and_refreshes_private_tokens(
 
 
 def test_prepare_credentials_guards_non_test_database(monkeypatch, tmp_path):
-    monkeypatch.setattr(burst, "env", lambda name: "tickfast")
+    monkeypatch.setattr(credentials, "env", lambda name: "tickfast")
     monkeypatch.setattr(
-        burst,
+        credentials,
         "create_user",
         lambda role: pytest.fail("must reject before creating users"),
     )

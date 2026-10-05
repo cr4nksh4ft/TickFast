@@ -12,7 +12,7 @@ from tickfast.states import UserRole
 JWT_ALGORITHM = "HS256"
 JWT_ISSUER = "tickfast"
 JWT_AUDIENCE = "tickfast-api"
-JWT_LIFETIME = timedelta(hours=1)
+JWT_LIFETIME = timedelta(days=30)
 _bearer_scheme = HTTPBearer(auto_error=False)
 
 

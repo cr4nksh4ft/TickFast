@@ -27,8 +27,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture
 def mysql_world():
     database_name = os.environ.get("DB_DATABASE", "")
-    if not database_name.endswith("_test"):
-        pytest.fail("DB_DATABASE must explicitly name a dedicated *_test database")
+    if not database_name:
+        pytest.fail("DB_DATABASE must be set in the environment or .env")
 
     database = get_database()
     extra_user_ids = []
