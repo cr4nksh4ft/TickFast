@@ -1,9 +1,13 @@
+import asyncio
 import logging
+from time import monotonic
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Path, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Path, Request, status
 from peewee import PeeweeException
+from starlette.concurrency import run_in_threadpool
 
+from models import reservations
 from models.basemodel import DatabaseConfigurationError
 from models.reservations import (
     ReservationNotFoundError,
@@ -30,19 +34,47 @@ UserPrincipal = Annotated[Principal, Depends(require_user)]
     status_code=status.HTTP_201_CREATED,
     response_model=ReservationResponse,
 )
-def reserve_show(
+async def reserve_show(
     show_id: ShowId,
     payload: ReserveRequest,
     idempotency_key: IdempotencyKey,
     principal: UserPrincipal,
+    request: Request,
 ) -> dict[str, object]:
+    metrics = reservations._reservation_capacity_metrics
+    metrics.async_waiter_started()
+    admission_started = monotonic()
     try:
-        outcome = reserve_seats(
-            show_id,
-            principal.user_id,
-            payload.seats,
-            idempotency_key,
+        await asyncio.wait_for(
+            request.app.state.reservation_slots.acquire(),
+            timeout=reservations.RESERVATION_ADMISSION_TIMEOUT_MS / 1000,
         )
+    except TimeoutError:
+        metrics.async_waiter_cancelled()
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={
+                "code": "reservation_retry",
+                "message": "Reservation service is busy; retry with the same key and body",
+                "retry_after_ms": 50,
+            },
+            headers={"Retry-After": "1"},
+        ) from None
+    except BaseException:
+        metrics.async_waiter_cancelled()
+        raise
+    metrics.async_slot_acquired(monotonic() - admission_started)
+    try:
+        try:
+            outcome = await run_in_threadpool(
+                reserve_seats,
+                show_id,
+                principal.user_id,
+                payload.seats,
+                idempotency_key,
+            )
+        finally:
+            request.app.state.reservation_slots.release()
     except ShowNotFoundError:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -67,7 +99,16 @@ def reserve_show(
         detail = outcome.body.get("detail")
         if not isinstance(detail, dict):
             raise RuntimeError("Stored reservation decline has an invalid body")
-        raise HTTPException(status_code=outcome.status_code, detail=detail)
+        headers = (
+            {"Retry-After": "1"}
+            if detail.get("code") in {"hold_in_progress", "reservation_retry"}
+            else None
+        )
+        raise HTTPException(
+            status_code=outcome.status_code,
+            detail=detail,
+            headers=headers,
+        )
     return outcome.body
 
 

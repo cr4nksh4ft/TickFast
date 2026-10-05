@@ -1,5 +1,7 @@
+import asyncio
 import json
 import logging
+from contextlib import asynccontextmanager
 from time import perf_counter
 from uuid import uuid4
 
@@ -9,6 +11,13 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from models.reservations import MAX_CONCURRENT_RESERVATION_TRANSACTIONS
+from models.reservations import (
+    HOLD_SWEEP_INTERVAL_SECONDS,
+    MAX_CONCURRENT_RESERVATION_TRANSACTIONS,
+    sweep_expired_holds,
+)
+from starlette.concurrency import run_in_threadpool
 from tickfast.api.routes.health import router as health_router
 from tickfast.api.routes.reservations import router as reservations_router
 from tickfast.api.routes.shows import router as shows_router
@@ -16,8 +25,33 @@ from tickfast.api.routes.shows import router as shows_router
 logger = logging.getLogger("tickfast.request")
 
 
+async def _hold_expiry_loop() -> None:
+    while True:
+        await asyncio.sleep(HOLD_SWEEP_INTERVAL_SECONDS)
+        try:
+            await run_in_threadpool(sweep_expired_holds)
+        except Exception:
+            logger.exception("Reservation hold expiry sweep failed")
+
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    sweeper = asyncio.create_task(_hold_expiry_loop())
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        try:
+            await sweeper
+        except asyncio.CancelledError:
+            pass
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="TickFast", version="0.1.0")
+    app = FastAPI(title="TickFast", version="0.1.0", lifespan=_lifespan)
+    app.state.reservation_slots = asyncio.Semaphore(
+        MAX_CONCURRENT_RESERVATION_TRANSACTIONS
+    )
     app.include_router(health_router)
     app.include_router(shows_router)
     app.include_router(reservations_router)

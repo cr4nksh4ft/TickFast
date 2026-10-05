@@ -1,8 +1,10 @@
+import asyncio
 import json
 import os
 import subprocess
 import sys
 import time
+from threading import Lock
 
 import httpx
 import jwt
@@ -455,6 +457,137 @@ def test_reservation_route_uses_token_identity_and_returns_service_result(
         "amount_paise": 25000,
         "status": "confirmed",
     }
+
+
+def test_hold_in_progress_route_returns_retry_hint(monkeypatch, client):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    monkeypatch.setattr(
+        reservation_routes,
+        "reserve_seats",
+        lambda *args: ReservationOutcome(
+            status_code=409,
+            body={
+                "detail": {
+                    "code": "hold_in_progress",
+                    "message": "Retry with the same key and body",
+                    "retry_after_ms": 50,
+                }
+            },
+        ),
+    )
+
+    response = client.post(
+        "/shows/9/reserve",
+        headers={
+            "Authorization": f"Bearer {auth.create_access_token(41)}",
+            "Idempotency-Key": "retry-hold",
+        },
+        json={"seats": ["A1"]},
+    )
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "1"
+    assert response.json()["detail"]["code"] == "hold_in_progress"
+
+
+def test_reservation_admission_timeout_returns_retryable_conflict(
+    monkeypatch, app, client
+):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    monkeypatch.setattr(reservation_routes.reservations, "RESERVATION_ADMISSION_TIMEOUT_MS", 1)
+    monkeypatch.setattr(
+        reservation_routes,
+        "reserve_seats",
+        lambda *args: pytest.fail("reservation ran without an admission slot"),
+    )
+    app.state.reservation_slots = asyncio.Semaphore(0)
+
+    response = client.post(
+        "/shows/9/reserve",
+        headers={
+            "Authorization": f"Bearer {auth.create_access_token(41)}",
+            "Idempotency-Key": "admission-timeout",
+        },
+        json={"seats": ["A1"]},
+    )
+
+    assert response.status_code == 409
+    assert response.headers["retry-after"] == "1"
+    assert response.json()["detail"]["code"] == "reservation_retry"
+    assert response.json()["detail"]["retry_after_ms"] == 50
+
+
+def test_reservation_route_bounds_worker_dispatch(monkeypatch, app):
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    monkeypatch.setattr(
+        auth,
+        "get_user_by_id",
+        lambda user_id: User(id=user_id, role=UserRole.USER.value),
+    )
+    app.state.reservation_slots = asyncio.Semaphore(2)
+    state_lock = Lock()
+    active = 0
+    peak_active = 0
+
+    def reserve_seats(show_id, user_id, seats, idempotency_key):
+        nonlocal active, peak_active
+        with state_lock:
+            active += 1
+            peak_active = max(peak_active, active)
+        time.sleep(0.01)
+        with state_lock:
+            active -= 1
+        return ReservationOutcome(
+            status_code=201,
+            body={
+                "reservation_id": int(idempotency_key),
+                "show_id": show_id,
+                "user_id": user_id,
+                "seats": seats,
+                "amount_paise": 25000,
+                "status": "confirmed",
+            },
+        )
+
+    monkeypatch.setattr(reservation_routes, "reserve_seats", reserve_seats)
+    token = auth.create_access_token(41)
+    async def send_requests():
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as test_client:
+            return await asyncio.gather(
+                *[
+                    test_client.post(
+                        "/shows/9/reserve",
+                        headers={
+                            "Authorization": f"Bearer {token}",
+                            "Idempotency-Key": str(index),
+                        },
+                        json={"seats": ["A1"]},
+                    )
+                    for index in range(1, 9)
+                ]
+            )
+
+    responses = asyncio.run(send_requests())
+
+    assert all(response.status_code == 201 for response in responses)
+    assert peak_active == 2
 
 
 def test_reservation_route_returns_structured_conflict(monkeypatch, client):

@@ -9,7 +9,7 @@ from tickfast.states import SeatState, UserRole
 def test_migrations_are_numbered_and_ordered():
     migrations = load_migrations()
 
-    assert [migration.version for migration in migrations] == list(range(1, 8))
+    assert [migration.version for migration in migrations] == list(range(1, 10))
     assert [migration.filename for migration in migrations] == [
         "001_create_shows.sql",
         "002_create_seats.sql",
@@ -18,6 +18,8 @@ def test_migrations_are_numbered_and_ordered():
         "005_create_reservation_seats.sql",
         "006_create_idempotency_results.sql",
         "007_create_show_user_usage.sql",
+        "008_add_hold_lease_to_idempotency.sql",
+        "009_add_hold_ownership_to_seats.sql",
     ]
 
 
@@ -59,6 +61,14 @@ def test_reservation_migrations_define_history_and_identity_constraints():
     )
     assert "PRIMARY KEY (show_id, user_id)" in show_user_usage
     assert "active_seat_count INTEGER UNSIGNED" in show_user_usage
+
+    hold_lease = migrations["008_add_hold_lease_to_idempotency.sql"]
+    seat_holds = migrations["009_add_hold_ownership_to_seats.sql"]
+    assert "ADD COLUMN hold_id BINARY(16) NULL" in hold_lease
+    assert "ADD COLUMN hold_expires_at DATETIME(6) NULL" in hold_lease
+    assert "ADD UNIQUE KEY uq_idempotency_results_hold_id (hold_id)" in hold_lease
+    assert "ADD COLUMN active_hold_id BINARY(16) NULL" in seat_holds
+    assert "FOREIGN KEY (active_hold_id, show_id)" in seat_holds
 
 
 def test_migration_must_contain_only_one_statement(tmp_path: Path):

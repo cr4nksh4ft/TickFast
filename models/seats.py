@@ -41,12 +41,29 @@ def get_show_state(show_id: int) -> dict[str, object] | None:
 		if show is None:
 			return None
 
-		seats = list(
-			Seat.select(Seat.label, Seat.status)
-			.where(Seat.show == show)
-			.order_by(Seat.id)
-			.dicts()
-		)
+		seat_rows = database.execute_sql(
+			"""
+			SELECT seats.label,
+				CASE
+					WHEN seats.status = 'held'
+						AND idempotency_results.hold_state = 'held'
+						AND idempotency_results.hold_expires_at <= CURRENT_TIMESTAMP(6)
+					THEN 'available'
+					ELSE seats.status
+				END AS status
+			FROM seats
+			LEFT JOIN idempotency_results
+				ON idempotency_results.hold_id = seats.active_hold_id
+				AND idempotency_results.hold_state = 'held'
+			WHERE seats.show_id = %s
+			ORDER BY seats.id
+			""",
+			(show.id,),
+		).fetchall()
+		seats = [
+			{"label": str(label), "status": str(status)}
+			for label, status in seat_rows
+		]
 
 	counts = {state.value: 0 for state in SeatState}
 	for seat in seats:
