@@ -46,14 +46,18 @@ A 20,000-request run with a client concurrency cap of 500 passed in 164.81 secon
 
 The latest 20,000-client-concurrency run (show 66) kept every correctness check intact: four reservations, no 5xx, no mismatched same-key outcomes, and seat reconciliation PASS. The runner still returned FAIL because 98 requests hit client-side `ConnectTimeout` after their bounded retries, and 8,804 keys ended on a retryable `reservation_retry` (reported as `Completion: INCOMPLETE`). Throughput stays near 120-170 requests/sec at every concurrency level, and CPU sampling showed the four-process Python client pegged near 400% while the API and MySQL had headroom, so the load generator is the likely limit. The 20,000-concurrency run is therefore not a clean pass.
 
-Railway is the planned host, restricted to free credits only. No Railway deployment or public URL has been verified. Before deployment, rotate the MySQL password in the database and replace the previously exposed `JWT_SECRET`. Configure Railway's private MySQL variables, use its assigned `PORT`, start with one API worker and a modest DB pool, mount the persistent credentials volume, verify cold start and health endpoints, and stop services before credits are exhausted. Do not claim the trial deployment can handle the full burst until measured there.
+Railway deployment is live at `https://tickfast-production.up.railway.app`. Cold start applied migrations, generated credentials for 500 users and one admin, and started Uvicorn on Railway's assigned port. `/health/live`, `/health/ready`, `/metrics`, and `/openapi.json` returned HTTP 200. A single-request smoke test created a show, reserved a seat, read the show state, and canceled the reservation; the seat returned to available. Metrics are publicly reachable; structured application logs are available in the Railway project dashboard, not through a public log endpoint. No burst was run against production.
+
+The local Compose burst at 500 concurrency passed. A separate 20,000-client-concurrency local run did not complete cleanly: it had 98 client `ConnectTimeout` errors and 8,804 keys ending on retryable responses, though there were no 5xx responses, no mismatched idempotency outcomes, and final seat reconciliation passed. The local runner is not a validated live-URL burst tool, and this submission does not claim a clean 20,000-concurrency end-to-end pass.
+
+Railway bills resource usage rather than a fixed amount per request. A production burst could increase compute, memory, network egress, and MySQL volume usage because reservation attempts write idempotency outcomes. No production burst was run, so its incremental cost is unmeasured; check the Railway workspace usage page and current plan limits before authorizing one.
 
 The burst runner currently targets the local Compose API. No remote burst mode was added; the local runner is the available concurrency test tool.
 
 ## Next Work
 
-1. Rotate exposed credentials, deploy on Railway within the free-credit constraint, and verify the live service and operational observability.
-2. Add a Prometheus server or alert rules only if the submission needs hosted dashboards or alert delivery; the application currently exposes the scrape endpoint only.
+1. Provide admin and user test tokens through a secure channel if the reviewer needs to exercise protected routes; do not share the database password or `JWT_SECRET`.
+2. Add alert delivery only if the submission needs hosted notifications; `/metrics` is exposed, but no monitoring server or public log endpoint is configured.
 
 ## AI Use
 
