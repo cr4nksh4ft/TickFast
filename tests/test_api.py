@@ -75,6 +75,18 @@ def test_liveness_does_not_depend_on_database(client):
     assert response.headers["x-request-id"]
 
 
+def test_root_returns_welcome_message_and_service_links(client):
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "message": "Welcome to TickFast API",
+        "docs": "/docs",
+        "health": "/health/live",
+    }
+    assert response.headers["x-request-id"]
+
+
 def test_unexpected_errors_return_generic_body_and_request_id():
     app = create_app()
 

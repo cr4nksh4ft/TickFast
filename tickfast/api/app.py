@@ -58,6 +58,14 @@ def create_app() -> FastAPI:
     app.include_router(shows_router)
     app.include_router(reservations_router)
 
+    @app.get("/")
+    def welcome() -> dict[str, str]:
+        return {
+            "message": "Welcome to TickFast API",
+            "docs": "/docs",
+            "health": "/health/live",
+        }
+
     @app.middleware("http")
     async def add_request_id(request: Request, call_next):
         request_id = uuid4().hex

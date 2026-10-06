@@ -38,8 +38,10 @@ curl -X POST http://127.0.0.1:8000/shows/1/reserve \
 curl http://127.0.0.1:8000/shows/1 -H "Authorization: Bearer $USER_TOKEN"
 ```
 
-Interactive API docs are at `http://127.0.0.1:8000/docs`. Reusing an
-`Idempotency-Key` with the same body replays the original response.
+The API root at `http://127.0.0.1:8000/` returns a welcome message with links
+to the interactive API docs and liveness check. Interactive API docs are at
+`http://127.0.0.1:8000/docs`. Reusing an `Idempotency-Key` with the same body
+replays the original response.
 
 For the concurrency check, see [Reservation Burst Test](#reservation-burst-test).
 Stop with `docker compose down` (`-v` also deletes the MySQL data).
