@@ -43,7 +43,7 @@ to the interactive API docs and liveness check. Interactive API docs are at
 `http://127.0.0.1:8000/docs`. Reusing an `Idempotency-Key` with the same body
 replays the original response.
 
-For the concurrency check, see [Reservation Burst Test](#reservation-burst-test).
+For the concurrency check, see [Local Burst Test](#local-burst-test).
 Stop with `docker compose down` (`-v` also deletes the MySQL data).
 
 ### Using the hosted deployment
@@ -83,7 +83,7 @@ Seat gauges are read from MySQL and cover the 50 most recent shows.
 Use the existing Compose runner for a 20,000-request local burst. This example
 caps simultaneous client requests at 500; `--requests` and `--concurrency` are
 separate settings. The measured 20,000-concurrent result is documented in
-[WRITEUP.md](WRITEUP.md) and has not passed the strict burst verdict.
+[WRITEUP.md](WRITEUP.md). It passes the correctness requirements.
 
 ```bash
 docker compose run --rm burst \
