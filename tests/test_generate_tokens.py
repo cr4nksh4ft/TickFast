@@ -65,16 +65,24 @@ def test_generate_tokens_requires_two_users(monkeypatch):
         raise AssertionError("expected argparse to reject fewer than two users")
 
 
-def test_generate_tokens_refuses_non_private_existing_directory(tmp_path):
+def test_generate_tokens_restricts_existing_directory_permissions(
+    tmp_path, monkeypatch
+):
     output_dir = tmp_path / "credentials"
     output_dir.mkdir(mode=0o755)
     os.chmod(output_dir, 0o755)
 
+    def stop_before_writing_tokens(*args):
+        raise RuntimeError("credential generation reached")
+
+    monkeypatch.setattr(
+        generate_tokens, "prepare_credentials", stop_before_writing_tokens
+    )
     try:
         generate_tokens.generate_credentials(2, output_dir, False)
-    except ValueError as error:
-        assert "must be private" in str(error)
+    except RuntimeError as error:
+        assert "credential generation reached" in str(error)
     else:
-        raise AssertionError("expected insecure output directory to be rejected")
+        raise AssertionError("expected token generation to reach the mocked stop")
 
-    assert output_dir.stat().st_mode & 0o777 == 0o755
+    assert output_dir.stat().st_mode & 0o777 == 0o700

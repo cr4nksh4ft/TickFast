@@ -35,9 +35,17 @@ def generate_credentials(
         if not output_dir.is_dir():
             raise ValueError("credential output path must be a directory")
         if stat.S_IMODE(output_dir.stat().st_mode) & 0o077:
+            try:
+                os.chmod(output_dir, 0o700)
+            except OSError as error:
+                raise ValueError(
+                    "credential output directory must be private (mode 0700); "
+                    "permissions could not be restricted"
+                ) from error
+        if stat.S_IMODE(output_dir.stat().st_mode) & 0o077:
             raise ValueError(
                 "credential output directory must be private (mode 0700); "
-                "restrict its permissions before retrying"
+                "permissions could not be restricted"
             )
     else:
         output_dir.mkdir(mode=0o700, parents=True)
