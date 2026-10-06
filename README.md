@@ -78,7 +78,10 @@ Seat gauges are read from MySQL and cover the 50 most recent shows.
 
 ## Local Burst Test
 
-Use the existing Compose runner for the 20,000-request local concurrency test:
+Use the existing Compose runner for a 20,000-request local burst. This example
+caps simultaneous client requests at 500; `--requests` and `--concurrency` are
+separate settings. The measured 20,000-concurrent result is documented in
+[WRITEUP.md](WRITEUP.md) and has not passed the strict burst verdict.
 
 ```bash
 docker compose run --rm burst \

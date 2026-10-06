@@ -18,7 +18,7 @@ import httpx
 from peewee import PeeweeException
 
 from models.basemodel import DatabaseConfigurationError, get_database
-from scripts.credentials import BurstUser, prepare_credentials, read_user_ids
+from scripts.credentials import BurstUser, prepare_credentials
 from tickfast.api.auth import AuthConfigurationError
 from utils.env import env
 
@@ -26,6 +26,9 @@ DEFAULT_SEATS = ("A1", "A2", "A3", "A4")
 DEFAULT_REQUESTS = 20_000
 DEFAULT_CONCURRENCY = 500
 DEFAULT_PROCESSES = 4
+RETRYABLE_RESPONSE_CODES = frozenset(
+    {"hold_in_progress", "reservation_retry", "reservation_unavailable"}
+)
 LOGGER = logging.getLogger(__name__)
 
 
@@ -200,6 +203,8 @@ def _write_metrics(
             key = str(result.status_code) if result.status_code is not None else result.error or "error"
             latency_by_status[key].append(result.elapsed_ms)
 
+    retry_attempts = sum(result.retry_attempts for result in results)
+    http_attempts = len(results) + retry_attempts
     counts = final_state.get("counts", {})
     total_seats = final_state.get("total_seats")
     count_sum = sum(int(value) for value in counts.values()) if isinstance(counts, dict) else -1
@@ -247,21 +252,26 @@ def _write_metrics(
             "event": "run_summary",
             "run_id": run_id,
             "timestamp": now,
-            "requests": arguments.requests,
+            "planned_attempts": arguments.requests,
+            "completed_attempts": len(results),
+            "http_attempts": http_attempts,
             "concurrency_cap": arguments.concurrency,
             "processes": arguments.processes,
             "users": arguments.users,
             "retry_percent": arguments.retry_percent,
             "max_retries": arguments.max_retries,
             "timeout_seconds": arguments.timeout,
-            "retry_attempts": sum(result.retry_attempts for result in results),
+            "retry_attempts": retry_attempts,
             "transport_retries": sum(result.transport_retries for result in results),
             "recovery_successes": sum(
                 result.retry_attempts > 0 and result.status_code == 201
                 for result in results
             ),
             "duration_seconds": round(elapsed_seconds, 3),
-            "requests_per_second": round(len(results) / elapsed_seconds, 2)
+            "attempts_per_second": round(len(results) / elapsed_seconds, 2)
+            if elapsed_seconds
+            else 0.0,
+            "http_attempts_per_second": round(http_attempts / elapsed_seconds, 2)
             if elapsed_seconds
             else 0.0,
             "peak_in_flight": peak_in_flight,
@@ -310,7 +320,7 @@ async def send_attempts(
             if completed % progress_interval == 0 or completed == len(attempts):
                 elapsed = time.perf_counter() - started_at
                 LOGGER.info(
-                    "Progress: %d/%d requests completed (%.1f req/s; "
+                    "Progress: %d/%d attempts completed (%.1f attempts/s; "
                     "%d in flight)",
                     completed,
                     len(attempts),
@@ -373,11 +383,9 @@ async def send_attempts(
                     body = {"response_text": response.text[:300]}
                 detail = body.get("detail") if isinstance(body, dict) else None
                 code = detail.get("code") if isinstance(detail, dict) else None
-                retryable_response = code in {
-                    "hold_in_progress",
-                    "reservation_retry",
-                    "reservation_unavailable",
-                } or response.status_code == 503
+                retryable_response = (
+                    code in RETRYABLE_RESPONSE_CODES or response.status_code == 503
+                )
                 if retryable_response and retry_attempts < max_retries:
                     retry_after_ms = (
                         detail.get("retry_after_ms")
@@ -641,6 +649,7 @@ def report_results(
     status_counts = Counter()
     declines = Counter()
     result_groups = defaultdict(list)
+    retryable_keys = set()
     reservations = {}
     transport_errors = Counter()
     malformed_successes = 0
@@ -661,7 +670,9 @@ def report_results(
             detail = body.get("detail") if isinstance(body, dict) else None
             code = detail.get("code") if isinstance(detail, dict) else None
             declines[str(code or "unknown")] += 1
-            if code not in {"hold_in_progress", "reservation_retry"}:
+            if code in RETRYABLE_RESPONSE_CODES:
+                retryable_keys.add(result.attempt.idempotency_key)
+            else:
                 result_groups[result.attempt.idempotency_key].append(result)
         elif status == 201:
             result_groups[result.attempt.idempotency_key].append(result)
@@ -676,6 +687,7 @@ def report_results(
         for grouped_results in result_groups.values()
         if len(grouped_results) > 1
     )
+    unresolved_retryable_keys = retryable_keys - set(result_groups)
     seat_winners = defaultdict(set)
     user_reservations = Counter()
     for reservation_id, body in reservations.items():
@@ -704,6 +716,10 @@ def report_results(
     for error_type, count in sorted(transport_errors.items()):
         print(f"  {error_type}: {count:,}")
     print(f"Mismatched same-key outcomes: {mismatched_replay_keys:,}")
+    print(
+        "Unresolved retryable idempotency keys: "
+        f"{len(unresolved_retryable_keys):,}"
+    )
     transport_retries = sum(result.transport_retries for result in results)
     print(
         f"Retry attempts: {retry_attempts:,} (retryable responses: "
@@ -745,6 +761,11 @@ def report_results(
         print(f"Users over the four-seat limit: {sorted(limit_violations)}")
     if not all_targeted_seats_present:
         print("At least one configured hot seat had no successful reservation.")
+    if unresolved_retryable_keys:
+        print(
+            f"Completion: INCOMPLETE ({len(unresolved_retryable_keys):,} keys "
+            "ended on a retryable response; not a correctness violation)"
+        )
     print(f"Burst result: {'PASS' if passed else 'FAIL'}")
     return 0 if passed else 1
 

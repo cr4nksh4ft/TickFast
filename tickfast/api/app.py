@@ -11,7 +11,6 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from models.reservations import MAX_CONCURRENT_RESERVATION_TRANSACTIONS
 from models.reservations import (
     HOLD_SWEEP_INTERVAL_SECONDS,
     MAX_CONCURRENT_RESERVATION_TRANSACTIONS,

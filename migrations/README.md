@@ -13,10 +13,11 @@ SQL files in ascending order. It is not run when the API imports or starts.
 The initial migrations use enforced `CHECK` constraints and require MySQL 8.0.16
 or newer.
 
-Use filenames such as `003_add_reservations.sql`. Each file must contain exactly
-one SQL statement. The runner stores each applied file's SHA-256 checksum and
-fails if an applied file is changed or removed. Add a new numbered migration
-instead of editing an applied one.
+Use the next unused number, such as `010_add_reservations.sql` after the current
+`009` migration. Each file must contain exactly one SQL statement. The runner
+stores each applied file's SHA-256 checksum and fails if an applied file is
+changed or removed. Add a new numbered migration instead of editing an applied
+one.
 
 Migrations are forward-only. MySQL DDL can commit independently of the history
 record. If a migration reports failure after its DDL ran, first inspect the

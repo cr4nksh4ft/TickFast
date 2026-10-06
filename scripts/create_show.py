@@ -32,11 +32,9 @@ def main() -> int:
         )
     except httpx.RequestError as exc:
         parser.error(f"request to TickFast API failed: {type(exc).__name__}")
-        return 2
 
     if response.is_error:
         parser.error(f"TickFast API returned {response.status_code}: {response.text}")
-        return 2
 
     print(json.dumps(response.json(), indent=2))
     return 0

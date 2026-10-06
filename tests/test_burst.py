@@ -17,9 +17,9 @@ from scripts.burst import (
     BurstUser,
     build_attempts,
     prepare_credentials,
-    read_user_ids,
     report_results,
 )
+from scripts.credentials import read_user_ids
 
 
 def _token(user_id: int) -> str:
@@ -216,6 +216,73 @@ def test_report_deduplicates_successful_replays_and_counts_declines(capsys):
     assert "Retry attempts: 1" in output
     assert "Retry recoveries: 1" in output
     assert "reconciliation=PASS" in output
+
+
+@pytest.mark.parametrize("code", ["hold_in_progress", "reservation_retry"])
+def test_report_flags_retryable_key_without_terminal_outcome_as_incomplete(code, capsys):
+    unresolved = Attempt(BurstUser(1, "token-1"), "A2", "unresolved-key")
+    winner = Attempt(BurstUser(2, "token-2"), "A1", "winner-key")
+
+    result = report_results(
+        [
+            AttemptResult(
+                unresolved,
+                409,
+                {"detail": {"code": code}},
+                retry_attempts=3,
+            ),
+            AttemptResult(
+                winner,
+                201,
+                {"reservation_id": 101, "user_id": 2, "seats": ["A1"]},
+            ),
+        ],
+        {
+            "counts": {"available": 1, "held": 0, "confirmed": 1},
+            "total_seats": 2,
+        },
+        ["A1"],
+        peak_in_flight=2,
+    )
+
+    output = capsys.readouterr().out
+    assert result == 0
+    assert "Unresolved retryable idempotency keys: 1" in output
+    assert "Completion: INCOMPLETE (1 keys" in output
+
+
+def test_report_resolves_retryable_key_with_terminal_decline(capsys):
+    shared_key_attempt = Attempt(BurstUser(2, "token-2"), "A2", "shared-key")
+    winner = Attempt(BurstUser(1, "token-1"), "A1", "winner-key")
+
+    result = report_results(
+        [
+            AttemptResult(
+                shared_key_attempt,
+                409,
+                {"detail": {"code": "reservation_retry"}},
+            ),
+            AttemptResult(
+                shared_key_attempt,
+                409,
+                {"detail": {"code": "seat_taken"}},
+            ),
+            AttemptResult(
+                winner,
+                201,
+                {"reservation_id": 101, "user_id": 1, "seats": ["A1"]},
+            ),
+        ],
+        {
+            "counts": {"available": 1, "held": 0, "confirmed": 1},
+            "total_seats": 2,
+        },
+        ["A1"],
+        peak_in_flight=3,
+    )
+
+    assert result == 0
+    assert "Unresolved retryable idempotency keys: 0" in capsys.readouterr().out
 
 
 def test_send_attempts_logs_transport_details_without_token(caplog):
@@ -528,3 +595,8 @@ def test_write_metrics_emits_request_samples_and_summary(tmp_path):
     assert events[3]["recovery_successes"] == 1
     assert events[3]["max_retries"] == 3
     assert events[3]["timeout_seconds"] == 60.0
+    assert events[3]["planned_attempts"] == 2
+    assert events[3]["completed_attempts"] == 2
+    assert events[3]["http_attempts"] == 3
+    assert events[3]["attempts_per_second"] == 2.0
+    assert events[3]["http_attempts_per_second"] == 3.0

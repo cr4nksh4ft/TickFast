@@ -15,7 +15,7 @@ from uuid import uuid4
 
 import peewee as pw
 
-from models.basemodel import MYSQL_LOCK_WAIT_TIMEOUT_SECONDS, get_database
+from models.basemodel import get_database
 from tickfast.metrics import record_reservation_outcome
 from tickfast.states import SeatState
 from utils.env import env
@@ -51,18 +51,9 @@ RESERVATION_HOLD_TTL_SECONDS = _positive_integer_setting(
 RESERVATION_ADMISSION_TIMEOUT_MS = _positive_integer_setting(
     "RESERVATION_ADMISSION_TIMEOUT_MS", 1000
 )
-try:
-    MAX_CONCURRENT_RESERVATION_TRANSACTIONS = int(
-        env("RESERVATION_MAX_CONCURRENT_TRANSACTIONS", "16") or "16"
-    )
-except ValueError:
-    raise RuntimeError(
-        "RESERVATION_MAX_CONCURRENT_TRANSACTIONS must be a positive integer"
-    ) from None
-if MAX_CONCURRENT_RESERVATION_TRANSACTIONS < 1:
-    raise RuntimeError(
-        "RESERVATION_MAX_CONCURRENT_TRANSACTIONS must be a positive integer"
-    )
+MAX_CONCURRENT_RESERVATION_TRANSACTIONS = _positive_integer_setting(
+    "RESERVATION_MAX_CONCURRENT_TRANSACTIONS", 16
+)
 _reservation_slots = BoundedSemaphore(MAX_CONCURRENT_RESERVATION_TRANSACTIONS)
 RESERVATION_METRICS_INTERVAL_SECONDS = 10.0
 
@@ -217,6 +208,20 @@ class _HoldLease:
     request_hash: str
     hold_id: bytes
     seat_labels: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class _IdempotencyRow:
+    request_hash: object
+    reservation_id: object
+    response_status: object
+    response_body: object
+    hold_id: object
+    hold_state: object
+    hold_expires_at: object
+    updated_at: object
+    database_now: object | None = None
+    hold_duration_microseconds: object | None = None
 
 
 def _normalize_seat_labels(seat_labels: list[str]) -> list[str]:
@@ -411,8 +416,8 @@ def _lock_idempotency_row(
     show_id: int,
     user_id: int,
     idempotency_key: bytes,
-) -> tuple[object, ...] | None:
-    return database.execute_sql(
+) -> _IdempotencyRow | None:
+    row = database.execute_sql(
         """
         SELECT request_hash, reservation_id, response_status, response_body,
             hold_id, hold_state, hold_expires_at, updated_at,
@@ -424,6 +429,9 @@ def _lock_idempotency_row(
         """,
         (show_id, user_id, idempotency_key),
     ).fetchone()
+    if row is None:
+        return None
+    return _IdempotencyRow(*row)
 
 
 class _ReservationLockSetChanged(RuntimeError):
@@ -472,7 +480,7 @@ def _acquire_hold_once(
         usage_counts = _lock_usage_rows(database, show_id, candidate_user_ids)
 
         current_identity = (user_id, idempotency_key)
-        locked_rows: dict[tuple[int, bytes], tuple[object, ...]] = {}
+        locked_rows: dict[tuple[int, bytes], _IdempotencyRow] = {}
         current_holds = database.execute_sql(
             """
             SELECT idempotency_key, request_hash, reservation_id,
@@ -487,8 +495,15 @@ def _acquire_hold_once(
         ).fetchall()
         for row in current_holds:
             key = _database_bytes(row[0])
-            locked_rows[(user_id, key)] = (
-                row[1], row[2], row[3], row[4], row[5], row[6], row[7], row[8]
+            locked_rows[(user_id, key)] = _IdempotencyRow(
+                request_hash=row[1],
+                reservation_id=row[2],
+                response_status=row[3],
+                response_body=row[4],
+                hold_id=row[5],
+                hold_state=row[6],
+                hold_expires_at=row[7],
+                updated_at=row[8],
             )
 
         database.execute_sql(
@@ -517,8 +532,7 @@ def _acquire_hold_once(
                 raise _ReservationLockSetChanged()
             locked_rows[identity] = row
 
-        stored_hash, reservation_id, response_status, response_body = idempotency_row[:4]
-        if stored_hash != request_hash:
+        if idempotency_row.request_hash != request_hash:
             return ReservationOutcome(
                 status_code=409,
                 body={
@@ -529,20 +543,24 @@ def _acquire_hold_once(
                 },
             )
 
-        response_status = int(response_status)
+        response_status = int(idempotency_row.response_status)
         if response_status in (201, 409):
             return ReservationOutcome(
                 status_code=response_status,
-                body=_decode_response_body(response_body),
+                body=_decode_response_body(idempotency_row.response_body),
                 replayed=True,
             )
-        if response_status != 0 or reservation_id is not None or response_body is not None:
+        if (
+            response_status != 0
+            or idempotency_row.reservation_id is not None
+            or idempotency_row.response_body is not None
+        ):
             raise RuntimeError("Stored idempotency outcome is incomplete or invalid")
 
-        database_now = idempotency_row[8]
-        current_hold_id = idempotency_row[4]
-        current_hold_state = idempotency_row[5]
-        current_hold_expiry = idempotency_row[6]
+        database_now = idempotency_row.database_now
+        current_hold_id = idempotency_row.hold_id
+        current_hold_state = idempotency_row.hold_state
+        current_hold_expiry = idempotency_row.hold_expires_at
         if current_hold_state == "held" and current_hold_expiry > database_now:
             return _HoldLease(
                 show_id,
@@ -555,7 +573,9 @@ def _acquire_hold_once(
 
         expired_holds: dict[bytes, tuple[int, bytes]] = {}
         for identity, row in locked_rows.items():
-            hold_id, hold_state, expires_at = row[4], row[5], row[6]
+            hold_id = row.hold_id
+            hold_state = row.hold_state
+            expires_at = row.hold_expires_at
             if hold_state != "held" or expires_at is None or expires_at > database_now:
                 continue
             if identity[0] == user_id or identity in seat_owner_identities:
@@ -602,9 +622,9 @@ def _acquire_hold_once(
             for seat_id, label, status, hold_id in locked_seats
         }
         locked_hold_ids = {
-            _database_bytes(row[4])
+            _database_bytes(row.hold_id)
             for row in locked_rows.values()
-            if row[5] == "held" and row[4] is not None
+            if row.hold_state == "held" and row.hold_id is not None
         }
         for _, _, status, hold_id in locked_seats:
             if status == SeatState.HELD.value and (
@@ -797,8 +817,7 @@ def _finalize_hold_once(lease: _HoldLease) -> ReservationOutcome | None:
         )
         if row is None:
             raise RuntimeError("Hold idempotency row disappeared")
-        stored_hash, reservation_id, response_status, response_body = row[:4]
-        if stored_hash != lease.request_hash:
+        if row.request_hash != lease.request_hash:
             return ReservationOutcome(
                 status_code=409,
                 body={
@@ -808,29 +827,29 @@ def _finalize_hold_once(lease: _HoldLease) -> ReservationOutcome | None:
                     }
                 },
             )
-        response_status = int(response_status)
+        response_status = int(row.response_status)
         if response_status in (201, 409):
             return ReservationOutcome(
                 response_status,
-                _decode_response_body(response_body),
+                _decode_response_body(row.response_body),
                 replayed=True,
             )
         if (
             response_status != 0
-            or reservation_id is not None
-            or response_body is not None
+            or row.reservation_id is not None
+            or row.response_body is not None
         ):
             raise RuntimeError("Stored idempotency outcome is incomplete or invalid")
         if (
-            row[5] != "held"
-            or row[4] is None
-            or _database_bytes(row[4]) != lease.hold_id
+            row.hold_state != "held"
+            or row.hold_id is None
+            or _database_bytes(row.hold_id) != lease.hold_id
         ):
             return None
-        database_now = row[8]
-        if row[6] <= database_now:
+        database_now = row.database_now
+        if row.hold_expires_at <= database_now:
             return None
-        hold_duration_microseconds = int(row[9])
+        hold_duration_microseconds = int(row.hold_duration_microseconds)
 
         held_seats = database.execute_sql(
             """
@@ -980,12 +999,12 @@ def _expire_hold_once(
         row = _lock_idempotency_row(
             database, show_id, user_id, idempotency_key
         )
-        if row is None or row[5] != "held" or row[4] is None:
+        if row is None or row.hold_state != "held" or row.hold_id is None:
             return False
-        if _database_bytes(row[4]) != hold_id:
+        if _database_bytes(row.hold_id) != hold_id:
             return False
-        database_now = row[8]
-        if row[6] > database_now:
+        database_now = row.database_now
+        if row.hold_expires_at > database_now:
             return False
 
         held_seats = database.execute_sql(

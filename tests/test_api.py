@@ -40,6 +40,12 @@ def client(app):
         yield test_client
 
 
+def _set_test_secret(monkeypatch) -> str:
+    secret = "s" * 32
+    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    return secret
+
+
 def test_app_import_does_not_initialize_database():
     environment = os.environ.copy()
     for key in ("DB_DATABASE", "DB_USERNAME", "DB_PASSWORD", "DB_HOST", "DB_PORT"):
@@ -166,8 +172,7 @@ def test_show_contract_rejects_spoofed_seats_and_identity():
 
 
 def test_access_tokens_use_string_subject_and_30_day_lifetime(monkeypatch):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    secret = _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -189,8 +194,7 @@ def test_access_tokens_use_string_subject_and_30_day_lifetime(monkeypatch):
 
 
 def test_verified_principal_contains_integer_user_id(monkeypatch):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -209,8 +213,7 @@ def test_verified_principal_contains_integer_user_id(monkeypatch):
 
 @pytest.mark.parametrize("subject", ["0", "-1", "01", "user-1", "１２"])
 def test_verified_principal_rejects_noncanonical_user_ids(monkeypatch, subject):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    secret = _set_test_secret(monkeypatch)
     token = jwt.encode(
         {
             "sub": subject,
@@ -234,10 +237,9 @@ def test_verified_principal_rejects_noncanonical_user_ids(monkeypatch, subject):
 
 
 def test_mint_token_cli_uses_persisted_user_id_and_role(monkeypatch, capsys):
-    secret = "s" * 32
+    secret = _set_test_secret(monkeypatch)
     user = User(id=789, role=UserRole.ADMIN.value)
     lookups = []
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -380,8 +382,7 @@ def test_show_creation_requires_a_bearer_token(monkeypatch, client):
 
 
 def test_reservation_requires_user_auth_and_idempotency_key(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -412,8 +413,7 @@ def test_reservation_requires_user_auth_and_idempotency_key(monkeypatch, client)
 def test_reservation_route_uses_token_identity_and_returns_service_result(
     monkeypatch, client
 ):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -460,8 +460,7 @@ def test_reservation_route_uses_token_identity_and_returns_service_result(
 
 
 def test_hold_in_progress_route_returns_retry_hint(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -499,8 +498,7 @@ def test_hold_in_progress_route_returns_retry_hint(monkeypatch, client):
 def test_reservation_admission_timeout_returns_retryable_conflict(
     monkeypatch, app, client
 ):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -530,8 +528,7 @@ def test_reservation_admission_timeout_returns_retryable_conflict(
 
 
 def test_reservation_route_bounds_worker_dispatch(monkeypatch, app):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -591,8 +588,7 @@ def test_reservation_route_bounds_worker_dispatch(monkeypatch, app):
 
 
 def test_reservation_route_returns_structured_conflict(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -628,8 +624,7 @@ def test_reservation_route_returns_structured_conflict(monkeypatch, client):
 
 
 def test_cancellation_route_uses_token_identity(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -667,8 +662,7 @@ def test_cancellation_route_uses_token_identity(monkeypatch, client):
 
 
 def test_cancellation_route_forbids_non_owner(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -691,8 +685,7 @@ def test_cancellation_route_forbids_non_owner(monkeypatch, client):
 
 
 def test_invalid_and_expired_tokens_are_rejected(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    secret = _set_test_secret(monkeypatch)
     expired_token = jwt.encode(
         {
             "sub": "admin-1",
@@ -743,8 +736,7 @@ def test_invalid_and_expired_tokens_are_rejected(monkeypatch, client):
 
 
 def test_user_token_cannot_create_a_show(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -768,8 +760,7 @@ def test_user_token_cannot_create_a_show(monkeypatch, client):
 
 
 def test_admin_token_creates_show_and_returns_initial_seat_states(monkeypatch, client):
-    secret = "s" * 32
-    monkeypatch.setattr(auth, "_signing_secret", lambda: secret)
+    _set_test_secret(monkeypatch)
     monkeypatch.setattr(
         auth,
         "get_user_by_id",
@@ -824,24 +815,40 @@ def test_show_price_requires_an_integer(price_paise):
 
 
 @pytest.mark.parametrize(
+    ("request_model", "extra_fields"),
+    [
+        pytest.param(
+            CreateShowRequest,
+            {"name": "friday-night", "price_paise": 25000},
+            id="create-show",
+        ),
+        pytest.param(ReserveRequest, {}, id="reserve"),
+    ],
+)
+@pytest.mark.parametrize(
     "seats",
     [[], [" "], ["A1", "A1"], ["A1", "A1 "], ["X" * 256]],
 )
-def test_show_requires_unique_nonblank_seat_labels(seats):
+def test_requests_require_unique_nonblank_seat_labels(
+    request_model, extra_fields, seats
+):
     with pytest.raises(ValidationError):
-        CreateShowRequest(
-            name="friday-night",
-            seats=seats,
-            price_paise=25000,
-        )
+        request_model(seats=seats, **extra_fields)
 
 
-def test_show_contract_trims_seat_labels():
-    request = CreateShowRequest(
-        name="friday-night",
-        seats=[" A1 ", " B1"],
-        price_paise=25000,
-    )
+@pytest.mark.parametrize(
+    ("request_model", "extra_fields"),
+    [
+        pytest.param(
+            CreateShowRequest,
+            {"name": "friday-night", "price_paise": 25000},
+            id="create-show",
+        ),
+        pytest.param(ReserveRequest, {}, id="reserve"),
+    ],
+)
+def test_request_contract_trims_seat_labels(request_model, extra_fields):
+    request = request_model(seats=[" A1 ", " B1"], **extra_fields)
 
     assert request.seats == ["A1", "B1"]
 

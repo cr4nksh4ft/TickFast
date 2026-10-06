@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from models import reservations
-from models.basemodel import get_database
+from models.basemodel import MYSQL_LOCK_WAIT_TIMEOUT_SECONDS, get_database
 from models.seats import Seat, Show, get_recent_show_seat_counts, get_show_state
 from models.users import User
 from tickfast.api import auth
@@ -177,8 +177,8 @@ def test_lock_wait_timeout_is_initialized_and_survives_pool_reuse(mysql_world):
             "SELECT @@SESSION.innodb_lock_wait_timeout"
         ).fetchone()[0]
 
-    assert int(first_timeout) == reservations.MYSQL_LOCK_WAIT_TIMEOUT_SECONDS
-    assert int(reused_timeout) == reservations.MYSQL_LOCK_WAIT_TIMEOUT_SECONDS
+    assert int(first_timeout) == MYSQL_LOCK_WAIT_TIMEOUT_SECONDS
+    assert int(reused_timeout) == MYSQL_LOCK_WAIT_TIMEOUT_SECONDS
 
 
 def _insert_test_hold(

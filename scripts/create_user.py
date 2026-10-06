@@ -21,7 +21,6 @@ def main() -> int:
         user = create_user(UserRole(arguments.role))
     except (DatabaseConfigurationError, PeeweeException) as exc:
         parser.error(f"could not create user: {type(exc).__name__}")
-        return 2
 
     print(f"user_id={user.id} role={user.role}")
     return 0

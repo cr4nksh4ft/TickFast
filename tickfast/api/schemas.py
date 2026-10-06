@@ -9,6 +9,17 @@ class StrictRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
+def _normalize_seat_labels(value: list[str]) -> list[str]:
+    seats = [seat.strip() for seat in value]
+    if any(not seat for seat in seats):
+        raise ValueError("seat labels must not be blank")
+    if any(len(seat) > 255 for seat in seats):
+        raise ValueError("seat labels must be at most 255 characters")
+    if len(seats) != len(set(seats)):
+        raise ValueError("seat labels must be unique")
+    return seats
+
+
 class CreateShowRequest(StrictRequest):
     name: str = Field(min_length=1, max_length=255)
     seats: list[str] = Field(min_length=1)
@@ -25,14 +36,7 @@ class CreateShowRequest(StrictRequest):
     @field_validator("seats")
     @classmethod
     def seats_are_unique_and_nonblank(cls, value: list[str]) -> list[str]:
-        seats = [seat.strip() for seat in value]
-        if any(not seat for seat in seats):
-            raise ValueError("seat labels must not be blank")
-        if any(len(seat) > 255 for seat in seats):
-            raise ValueError("seat labels must be at most 255 characters")
-        if len(seats) != len(set(seats)):
-            raise ValueError("seat labels must be unique")
-        return seats
+        return _normalize_seat_labels(value)
 
 
 class ReserveRequest(StrictRequest):
@@ -41,14 +45,7 @@ class ReserveRequest(StrictRequest):
     @field_validator("seats")
     @classmethod
     def seats_are_unique_and_nonblank(cls, value: list[str]) -> list[str]:
-        seats = [seat.strip() for seat in value]
-        if any(not seat for seat in seats):
-            raise ValueError("seat labels must not be blank")
-        if any(len(seat) > 255 for seat in seats):
-            raise ValueError("seat labels must be at most 255 characters")
-        if len(seats) != len(set(seats)):
-            raise ValueError("seat labels must be unique")
-        return seats
+        return _normalize_seat_labels(value)
 
 
 class SeatResponse(BaseModel):

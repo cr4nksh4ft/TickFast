@@ -23,7 +23,6 @@ def main() -> int:
         ValueError,
     ) as exc:
         parser.error(str(exc))
-        return 2
 
     print(token)
     return 0
